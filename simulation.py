@@ -1,11 +1,14 @@
 import math 
 from paho.mqtt import client as mqtt
 
-from config import CLIENT_NAME, TOPICS
-        
+from handlers.config import TOPICS
+
+
 def sysCall_init():
     """ Initialization function for the robot and Velodyne LIDAR """
     sim = require('sim')
+    
+    self.client_name = sim.getStringSignal("client_name")
     
     # Pegando o objeto do robô completo
     self.pioneer = sim.getObject('.')
@@ -19,7 +22,7 @@ def sysCall_init():
     self.jointHandle=sim.getObject("../joint")
 
     # Configurando MQTT
-    self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, CLIENT_NAME)
+    self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, self.client_name)
     self.client.on_connect = on_connect
     self.client.on_disconnect = on_disconnect
 
@@ -46,7 +49,7 @@ def sysCall_sensing():
     
     # Varredura LIDAR
     max_dist = 6.0
-    scanning_angle = math.radians(240)  # 240 graus
+    scanning_angle = math.radians(360)  # 360 graus
     num_points = 684
     angle_start = -scanning_angle / 2
     angle_end = scanning_angle / 2
@@ -64,23 +67,24 @@ def sysCall_sensing():
             ranges.append(round(max_dist, 3))
 
     # Publica no MQTT
-    # self.client.publish(f"{CLIENT_NAME}/imu/linearVelocity", str(linear_velocity))
-    # self.client.publish(f"{CLIENT_NAME}/imu/angularVelocity", str(angular_velocity))
-    # self.client.publish(f"{CLIENT_NAME}/odometry/pose", str(position + orientation))
-    # self.client.publish(f"{CLIENT_NAME}/odometry/wheel_vel", str([left_wheel_velocity, right_wheel_velocity]))
-    self.client.publish(f"{CLIENT_NAME}/sensor/ranges", str(ranges))
+    self.client.publish(f"{self.client_name}/imu/linearVelocity", str(linear_velocity))
+    self.client.publish(f"{self.client_name}/imu/angularVelocity", str(angular_velocity))
+    self.client.publish(f"{self.client_name}/odometry/pose", str(position + orientation))
+    self.client.publish(f"{self.client_name}/odometry/wheel_vel", str([left_wheel_velocity, right_wheel_velocity]))
+    self.client.publish(f"{self.client_name}/sensor/ranges", str(ranges)) # mudar sensor para lidar
     
     
-
 def sysCall_cleanup():
     # Clean disconnect of MQTT client
     self.client.disconnect()
     
+
 def on_connect(client, userdata, flags, reason_code, properties):
         if reason_code == 0:
             print("Connected to MQTT Broker!")
             
             for topic in TOPICS:
+                topic = topic.replace("CLIENT", self.client_name)
                 client.subscribe(topic)
                 print(f"Subscribed to: {topic}")
 
@@ -92,4 +96,3 @@ def on_disconnect(client, userdata, flags, reason_code, properties):
         print("Disconnected to MQTT Broker!")
     if reason_code > 0:
         print("Failed to disconnect, return code %d\n", reason_code)
-        
