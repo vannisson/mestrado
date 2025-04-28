@@ -1,3 +1,10 @@
-paho-mqtt==2.1.0
+# Coppelia Dependencies 
 pyzmq==26.3.0
 cbor2==5.6.5
+
+# Mqtt Dependencies
+paho-mqtt==2.1.0
+
+# Application Dependencies
+numpy==2.2.5
+protobuf==6.30.2

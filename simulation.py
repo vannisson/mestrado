@@ -1,116 +1,106 @@
 import math
+import json
+from paho.mqtt import client as mqtt
+import sensor_data_struct_pb2  # novo import para o protobuf gerado
+
+from handlers.config import TOPICS
 
 def sysCall_init():
-    """ Initialization function for the robot and Velodyne LIDAR """
     sim = require('sim')
-    simVision = require('simVision')
+    
+    self.client_name = sim.getStringSignal("client_name")
+    
+    self.pioneer = sim.getObject('.')
+    self.motorLeft = sim.getObject("../leftMotor")
+    self.motorRight = sim.getObject("../rightMotor")
+    
+    self.laserHandle = sim.getObject("../laser")
+    self.jointHandle = sim.getObject("../joint")
 
-    global motorLeft, motorRight, lidar_handle, detect, braitenbergL, braitenbergR, v0, ptCloud
+    self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, self.client_name)
+    self.client.on_connect = on_connect
+    self.client.on_disconnect = on_disconnect
 
-    # Get motor handles
-    motorLeft = sim.getObject("../leftMotor")
-    motorRight = sim.getObject("../rightMotor")
+    broker = sim.getStringSignal("mqtt_broker")
+    port = sim.getInt32Signal("mqtt_port")
 
-    # Get vision sensors for Velodyne
-    visionSensorHandles = [sim.getObject(f"../sensor[{i}]") for i in range(4)]
-    ptCloud = sim.getObject("../ptCloud")
-
-    # Velodyne VPL-16 parameters
-    frequency = 5  # 5 Hz
-    options = 2 + 8  # Display settings
-    pointSize = 2
-    coloring_closeAndFarDistance = [1, 4]
-    displayScaling = 0.999
-
-    # Create Velodyne sensor and store handle
-    lidar_handle = simVision.createVelodyneVPL16(
-        visionSensorHandles, frequency, options, pointSize, coloring_closeAndFarDistance, displayScaling, ptCloud
-    )
-    if lidar_handle is None:
-        print("Error: Velodyne initialization failed!")
-
-    # Braitenberg algorithm settings
-    v0 = 2  # Base speed
-    detect = [0] * 16  # Simulated 16 virtual sensors from LIDAR
-
-    # Braitenberg behavior weights
-    braitenbergL = [-0.2, -0.4, -0.6, -0.8, -1, -1.2, -1.4, -1.6,  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    braitenbergR = [-1.6, -1.4, -1.2, -1, -0.8, -0.6, -0.4, -0.2,  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-
-def process_lidar_data():
-    """ Captures LIDAR data and simulates 16 virtual sensors """
-
-    if lidar_handle is None:
-        print("Error: Invalid LIDAR handle!")
-        return [0] * 16  # Return default empty detection
-
-    # Retrieve point cloud data using the Velodyne sensor
-    raw_data = simVision.handleVelodyneVPL16(lidar_handle + sim.handleflag_abscoords, sim.getSimulationTimeStep())
-
-    if not raw_data:
-        return [0] * 16  # If no points detected, return default array
-
-    # Sample fewer points to reduce computation time (process every 5th point)
-    distances = [math.sqrt(raw_data[i]**2 + raw_data[i+1]**2 + raw_data[i+2]**2) 
-                 for i in range(0, len(raw_data), 15)]  # Processing fewer points
-
-    # Detection range thresholds
-    noDetectionDist = 0.5  # Maximum distance where objects are ignored
-    maxDetectionDist = 0.2  # Minimum distance where objects are fully detected
-
-    # Define the number of virtual sectors for obstacle detection
-    num_sectors = 16
-    sector_values = [0] * num_sectors
-
-    # Get LIDAR's current orientation
-    lidar_orientation = sim.getObjectOrientation(lidar_handle, -1)[2] * 180 / 3.1415  
-
-    # Map each LIDAR point to its corresponding sector
-    for d in distances:
-        angle = lidar_orientation  
-        sector_index = int((angle + 180) / (360 / num_sectors))
-        if 0 <= sector_index < num_sectors:
-            if d < noDetectionDist:
-                if d < maxDetectionDist:
-                    d = maxDetectionDist  
-                sector_values[sector_index] = 1 - ((d - maxDetectionDist) / (noDetectionDist - maxDetectionDist))
-
-    return sector_values
-
+    self.client.connect(broker, port)
+    self.client.loop(0.01)
 
 def sysCall_sensing():
-    """ Handles point cloud visualization (optional) """
-    global ptCloud
+    sim = require('sim')
 
-    # Retrieve LIDAR data (processing at lower frequency)
-    if sim.getSimulationTime() % 1 == 0:  # Process every second (or choose another interval)
-        data = simVision.handleVelodyneVPL16(lidar_handle + sim.handleflag_abscoords, sim.getSimulationTimeStep())
+    linear_velocity, angular_velocity = sim.getObjectVelocity(self.pioneer)
+    position = sim.getObjectPosition(self.pioneer, -1)
+    orientation = sim.getObjectQuaternion(self.pioneer, -1)
+    left_wheel_velocity = sim.getJointVelocity(self.motorLeft)
+    right_wheel_velocity = sim.getJointVelocity(self.motorRight)
+    
+    max_dist = 6.0
+    scanning_angle = math.radians(360)
+    num_points = 684
+    angle_start = -scanning_angle / 2
 
-        # If we want to display the detected points ourselves:
-        if ptCloud:
-            sim.removePointsFromPointCloud(ptCloud, 0, None, 0)
+    ranges = []
+    intensities = []
+
+    for i in range(num_points):
+        angle = angle_start + i * (scanning_angle / num_points)
+        sim.setJointPosition(self.jointHandle, angle)
+        res, dist, point, _, _ = sim.handleProximitySensor(self.laserHandle)
+        if res > 0:
+            ranges.append(round(dist, 3))
+            intensities.append(1.0)
         else:
-            ptCloud = sim.createPointCloud(0.02, 20, 0, 2)  # Create a point cloud object
+            ranges.append(round(max_dist, 3))
+            intensities.append(0.0)
 
-        sim.insertPointsIntoPointCloud(ptCloud, 0, data)
+    # IMU
+    imu_msg = sensor_data_struct_pb2.IMUData(
+        linear_velocity=list(linear_velocity),
+        angular_velocity=list(angular_velocity),
+    )
+    self.client.publish(f"{self.client_name}/imu/linearVelocity", imu_msg.SerializeToString())
+    self.client.publish(f"{self.client_name}/imu/angularVelocity", imu_msg.SerializeToString())
 
+    # ODOMETRY
+    odom_msg = sensor_data_struct_pb2.OdometryData(
+        pose=list(position + orientation),
+        wheel_velocities=[left_wheel_velocity, right_wheel_velocity],
+    )
+    self.client.publish(f"{self.client_name}/odometry/pose", odom_msg.SerializeToString())
+    self.client.publish(f"{self.client_name}/odometry/wheel_vel", odom_msg.SerializeToString())
 
-def sysCall_actuation():
-    """ Applies Braitenberg logic to avoid obstacles """
-    global detect
-    detect = process_lidar_data()
-
-    vLeft = v0
-    vRight = v0
-
-    for i in range(16):
-        vLeft += braitenbergL[i] * detect[i]
-        vRight += braitenbergR[i] * detect[i]
-
-    sim.setJointTargetVelocity(motorLeft, vLeft)
-    sim.setJointTargetVelocity(motorRight, vRight)
+    # LIDAR
+    lidar_msg = sensor_data_struct_pb2.LidarScan(
+        angle_min=angle_start,
+        angle_max=angle_start + scanning_angle,
+        angle_increment=scanning_angle / num_points,
+        time_increment=0.0,
+        scan_time=0.0,
+        range_min=0.0,
+        range_max=max_dist,
+        ranges=ranges,
+        intensities=intensities,
+    )
+    self.client.publish(f"{self.client_name}/sensor/ranges", lidar_msg.SerializeToString())
 
 
 def sysCall_cleanup():
-    """ Cleans up Velodyne resources when simulation stops """
-    simVision.destroyVelodyneVPL16(lidar_handle)
+    self.client.disconnect()
+
+def on_connect(client, userdata, flags, reason_code, properties):
+    if reason_code == 0:
+        print("Connected to MQTT Broker!")
+        for topic in TOPICS:
+            topic = topic.replace("CLIENT", self.client_name)
+            client.subscribe(topic)
+            print(f"Subscribed to: {topic}")
+    else:
+        print("Failed to connect, return code %d\n", reason_code)
+
+def on_disconnect(client, userdata, flags, reason_code, properties):
+    if reason_code == 0:
+        print("Disconnected from MQTT Broker!")
+    if reason_code > 0:
+        print("Failed to disconnect, return code %d\n", reason_code)
