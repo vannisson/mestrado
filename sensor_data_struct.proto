@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package sensor_data_struct;
+
+message LidarScan {
+  float angle_min = 1;          // Ângulo inicial do scan (em radianos)
+  float angle_max = 2;          // Ângulo final do scan (em radianos)
+  float angle_increment = 3;    // Incremento angular entre as medições (em radianos)
+  float time_increment = 4;     // (Opcional) Tempo entre duas medições consecutivas
+  float scan_time = 5;          // (Opcional) Tempo para completar o scan inteiro
+  float range_min = 6;          // Distância mínima válida
+  float range_max = 7;          // Distância máxima válida
+  repeated float ranges = 8;    // Lista das distâncias medidas
+  repeated float intensities = 9; // Intensidade de cada medição
+}
+
+message IMUData {
+  repeated float linear_velocity = 1;  // Velocidade linear [vx, vy, vz]
+  repeated float angular_velocity = 2; // Velocidade angular [wx, wy, wz]
+}
+
+message OdometryData {
+  repeated float pose = 1;             // Pose [x, y, z, qx, qy, qz, qw]
+  repeated float wheel_velocities = 2; // Velocidades das rodas [esquerda, direita]
+}
+
+message SensorDataStruct {
+  IMUData imu = 1;
+  OdometryData odometry = 2;
+  LidarScan lidar = 3;
+}

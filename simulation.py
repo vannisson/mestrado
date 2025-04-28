@@ -1,98 +1,106 @@
-import math 
+import math
+import json
 from paho.mqtt import client as mqtt
+import sensor_data_struct_pb2  # novo import para o protobuf gerado
 
 from handlers.config import TOPICS
 
-
 def sysCall_init():
-    """ Initialization function for the robot and Velodyne LIDAR """
     sim = require('sim')
     
     self.client_name = sim.getStringSignal("client_name")
     
-    # Pegando o objeto do robô completo
     self.pioneer = sim.getObject('.')
-    
-    # Pegando os motores
     self.motorLeft = sim.getObject("../leftMotor")
     self.motorRight = sim.getObject("../rightMotor")
     
-    # Pegando o sensor
-    self.laserHandle=sim.getObject("../laser")
-    self.jointHandle=sim.getObject("../joint")
+    self.laserHandle = sim.getObject("../laser")
+    self.jointHandle = sim.getObject("../joint")
 
-    # Configurando MQTT
     self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, self.client_name)
     self.client.on_connect = on_connect
     self.client.on_disconnect = on_disconnect
 
-    # Pegando das variáveis globais
     broker = sim.getStringSignal("mqtt_broker")
     port = sim.getInt32Signal("mqtt_port")
 
     self.client.connect(broker, port)
-    self.client.loop(0.01)  # Para processar callbacks
-
+    self.client.loop(0.01)
 
 def sysCall_sensing():
-    """ Publica dados da IMU, odometria e LIDAR via MQTT """
     sim = require('sim')
 
-    # Captura os dados da IMU
     linear_velocity, angular_velocity = sim.getObjectVelocity(self.pioneer)
-
-    # Captura os dados da odometria
     position = sim.getObjectPosition(self.pioneer, -1)
     orientation = sim.getObjectQuaternion(self.pioneer, -1)
     left_wheel_velocity = sim.getJointVelocity(self.motorLeft)
     right_wheel_velocity = sim.getJointVelocity(self.motorRight)
     
-    # Varredura LIDAR
     max_dist = 6.0
-    scanning_angle = math.radians(360)  # 360 graus
+    scanning_angle = math.radians(360)
     num_points = 684
     angle_start = -scanning_angle / 2
-    angle_end = scanning_angle / 2
 
     ranges = []
+    intensities = []
 
     for i in range(num_points):
         angle = angle_start + i * (scanning_angle / num_points)
         sim.setJointPosition(self.jointHandle, angle)
         res, dist, point, _, _ = sim.handleProximitySensor(self.laserHandle)
-
         if res > 0:
             ranges.append(round(dist, 3))
+            intensities.append(1.0)
         else:
             ranges.append(round(max_dist, 3))
+            intensities.append(0.0)
 
-    # Publica no MQTT
-    self.client.publish(f"{self.client_name}/imu/linearVelocity", str(linear_velocity))
-    self.client.publish(f"{self.client_name}/imu/angularVelocity", str(angular_velocity))
-    self.client.publish(f"{self.client_name}/odometry/pose", str(position + orientation))
-    self.client.publish(f"{self.client_name}/odometry/wheel_vel", str([left_wheel_velocity, right_wheel_velocity]))
-    self.client.publish(f"{self.client_name}/sensor/ranges", str(ranges)) # mudar sensor para lidar
-    
-    
+    # IMU
+    imu_msg = sensor_data_struct_pb2.IMUData(
+        linear_velocity=list(linear_velocity),
+        angular_velocity=list(angular_velocity),
+    )
+    self.client.publish(f"{self.client_name}/imu/linearVelocity", imu_msg.SerializeToString())
+    self.client.publish(f"{self.client_name}/imu/angularVelocity", imu_msg.SerializeToString())
+
+    # ODOMETRY
+    odom_msg = sensor_data_struct_pb2.OdometryData(
+        pose=list(position + orientation),
+        wheel_velocities=[left_wheel_velocity, right_wheel_velocity],
+    )
+    self.client.publish(f"{self.client_name}/odometry/pose", odom_msg.SerializeToString())
+    self.client.publish(f"{self.client_name}/odometry/wheel_vel", odom_msg.SerializeToString())
+
+    # LIDAR
+    lidar_msg = sensor_data_struct_pb2.LidarScan(
+        angle_min=angle_start,
+        angle_max=angle_start + scanning_angle,
+        angle_increment=scanning_angle / num_points,
+        time_increment=0.0,
+        scan_time=0.0,
+        range_min=0.0,
+        range_max=max_dist,
+        ranges=ranges,
+        intensities=intensities,
+    )
+    self.client.publish(f"{self.client_name}/sensor/ranges", lidar_msg.SerializeToString())
+
+
 def sysCall_cleanup():
-    # Clean disconnect of MQTT client
     self.client.disconnect()
-    
 
 def on_connect(client, userdata, flags, reason_code, properties):
-        if reason_code == 0:
-            print("Connected to MQTT Broker!")
-            
-            for topic in TOPICS:
-                topic = topic.replace("CLIENT", self.client_name)
-                client.subscribe(topic)
-                print(f"Subscribed to: {topic}")
-
-        else:
-            print("Failed to connect, return code %d\n", reason_code)        
+    if reason_code == 0:
+        print("Connected to MQTT Broker!")
+        for topic in TOPICS:
+            topic = topic.replace("CLIENT", self.client_name)
+            client.subscribe(topic)
+            print(f"Subscribed to: {topic}")
+    else:
+        print("Failed to connect, return code %d\n", reason_code)
 
 def on_disconnect(client, userdata, flags, reason_code, properties):
     if reason_code == 0:
-        print("Disconnected to MQTT Broker!")
+        print("Disconnected from MQTT Broker!")
     if reason_code > 0:
         print("Failed to disconnect, return code %d\n", reason_code)

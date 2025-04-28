@@ -1,3 +1,10 @@
+# TOPICS = [
+#     # IMU
+#     "CLIENT/imu",
+#     "CLIENT/odometry",
+#     "CLIENT/sensor",
+# ]
+
 TOPICS = [
     # IMU
     "CLIENT/imu/linearVelocity",
