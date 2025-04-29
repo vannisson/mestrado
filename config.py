@@ -1,11 +1,4 @@
-# TOPICS = [
-#     # IMU
-#     "CLIENT/imu",
-#     "CLIENT/odometry",
-#     "CLIENT/sensor",
-# ]
-
-TOPICS = [
+VALIDATION_TOPICS = [
     # IMU
     "CLIENT/imu/linearVelocity",
     "CLIENT/imu/angularVelocity",
@@ -16,3 +9,9 @@ TOPICS = [
     "CLIENT/sensor/ranges",
     # "CLIENT/sensor/intensities",
 ]
+
+CONTROL_TOPIC = "CLIENT/cmd_vel"
+
+BROKER = "localhost"
+
+PORT = 1883

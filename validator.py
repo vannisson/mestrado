@@ -1,7 +1,7 @@
 from paho.mqtt import client as mqtt
-from handlers.config import TOPICS
+from config import VALIDATION_TOPICS, BROKER, PORT
 import numpy as np
-from sensor_data_struct_pb2 import IMUData, OdometryData, LidarScan
+from data.sensor_data_struct_pb2 import IMUData, OdometryData, LidarScan
 
 client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, "validator")
 
@@ -23,12 +23,12 @@ lidar_params = {
     agv_client: None,
 }
 
-lidar_params_checked = False  # <- Flag global para checar uma única vez
+lidar_params_checked = False
 
 def on_connect(client, userdata, flags, reason_code, properties):
     if reason_code == 0:
         print("Connected to MQTT Broker!")
-        for topic in TOPICS:
+        for topic in VALIDATION_TOPICS:
             coppelia_topic = topic.replace("CLIENT", coppelia_client)
             client.subscribe(coppelia_topic)
             print(f"Subscribed to: {coppelia_topic}")
@@ -157,5 +157,5 @@ if __name__ == "__main__":
     client.on_disconnect = on_disconnect
     client.on_message = on_message
 
-    client.connect("localhost", 1883)
+    client.connect(BROKER, PORT)
     client.loop_forever()
