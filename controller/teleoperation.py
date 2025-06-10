@@ -1,8 +1,11 @@
+import sys
+sys.path.append("C:\\Users\\geova\\repos\\mestrado") 
+
 import time
 import keyboard
 from paho.mqtt import client as mqtt
-from data.twist_pb2 import Twist  
-from config import BROKER, PORT, CONTROL_TOPIC
+from proto.twist_pb2 import Twist  
+from config.variables import BROKER, PORT, CONTROL_TOPIC
 
 COPPELIA_CLIENT = "coppelia"
 AGV_CLIENT = "agv"
@@ -21,9 +24,7 @@ def publish_cmd_vel():
     twist_msg.angular_z = angular_z
     payload = twist_msg.SerializeToString()
 
-    for target_client in [COPPELIA_CLIENT, AGV_CLIENT]:
-      topic = CONTROL_TOPIC.replace("CLIENT", target_client)
-      client.publish(topic, payload)
+    client.publish(CONTROL_TOPIC, payload)
 
 def on_connect(client, userdata, flags, reason_code, properties):
     if reason_code == 0:

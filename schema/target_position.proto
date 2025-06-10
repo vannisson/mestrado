@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package proto;
+
+message TargetPosition {
+  double x = 1;       // Coordenada X no plano
+  double y = 2;       // Coordenada Y no plano
+  double theta = 3;   // Orientação (rad), opcional para controle de rotação
+}
