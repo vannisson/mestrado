@@ -38,7 +38,8 @@ testBuffers = {}
 
 # --- Logging setup ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log_dir = os.path.join(os.getcwd(), "../logs", "validation")
+# log_dir = os.path.join(os.getcwd(), "../logs", "validation")
+log_dir = os.path.join(os.getcwd(), "logs", "validation")
 os.makedirs(log_dir, exist_ok=True)
 
 # --- MQTT callbacks ---
