@@ -3,8 +3,7 @@
 # - Assina fleet_manager/target_position (TargetPosition)
 # - Controla o Pioneer por perseguição a ponto (gera v,w -> wl,wr)
 # - Publica IMU, Odometria (pose=x,y,z,qx,qy,qz,qw) e velocidades de roda
-# - Loga CSVs no diretório do cenário corrente (definido pelo orchestrador)
-# - Simula latência de rede (não bloqueante)
+# - Loga CSVs em ../logs/agv_logs
 
 import sys
 sys.path.append("C:\\Users\\geova\\repos\\mestrado")
@@ -13,26 +12,34 @@ import os
 import csv
 import math
 import time
-import random
 from datetime import datetime
-from paho.mqtt import client as mqtt
 
+from paho.mqtt import client as mqtt
 import proto.sensor_data_struct_pb2
 from proto.target_position_pb2 import TargetPosition
 from config.variables import BROKER, PORT
 
-# ----------------------------------------------------------------------------- #
-# Estado "self" no estilo Coppelia
-# ----------------------------------------------------------------------------- #
+# -----------------------------------------------------------------------------
+# Estado "self" no estilo Coppelia (mantém compatibilidade com script)
+# -----------------------------------------------------------------------------
 self = type('', (), {})()
 
-# ----------------------------------------------------------------------------- #
-# Funções utilitárias para log e tempo
-# ----------------------------------------------------------------------------- #
+# Diretório de logs
+log_dir = os.path.join(os.getcwd(), "../logs", "agv_logs")
+os.makedirs(log_dir, exist_ok=True)
+
+# Parâmetros do robô
+WHEEL_RADIUS = 0.05
+WHEEL_BASE   = 0.30
+MQTT_QOS     = 1
+
+# -----------------------------------------------------------------------------
+# Tempo e logging padronizado (t, x, y, theta)
+# -----------------------------------------------------------------------------
 start_time = time.perf_counter()
 
 def now_t():
-    """Tempo relativo (s) desde o início da simulação."""
+    """Tempo relativo (segundos) desde o início da simulação"""
     return float(time.perf_counter() - start_time)
 
 _log_handles = {}
@@ -47,51 +54,41 @@ def _ensure_log(path, headers):
     return f, w
 
 def log_row(file_path, headers, row):
-    """Escreve linha de log no arquivo especificado."""
     if file_path not in _log_handles:
         _log_handles[file_path] = _ensure_log(file_path, headers)
     _, w = _log_handles[file_path]
     w.writerow(row)
 
-# ----------------------------------------------------------------------------- #
-# Parâmetros do robô e MQTT
-# ----------------------------------------------------------------------------- #
-WHEEL_RADIUS = 0.05
-WHEEL_BASE   = 0.30
-MQTT_QOS     = 1
+# -----------------------------------------------------------------------------
+# Utilitários
+# -----------------------------------------------------------------------------
+def normalize_angle(angle: float) -> float:
+    while angle > math.pi:
+        angle -= 2 * math.pi
+    while angle < -math.pi:
+        angle += 2 * math.pi
+    return angle
 
-# ----------------------------------------------------------------------------- #
-# Delay artificial (simulação de latência de rede)
-# ----------------------------------------------------------------------------- #
-COMM_DELAY_MEAN = 0.0  # atraso médio (s)
-COMM_DELAY_STD  = 0.0  # jitter (s)
-self._pending_msgs = []
+def mqtt_publish_ts(client, topic: str, payload: bytes | str):
+    """Publica payload binário (protobuf) com QoS=1 e timestamp opcional"""
+    pub_ts_ms = int(time.time() * 1000)
 
-def mqtt_publish_delayed(client, topic: str, payload: bytes | str):
-    """Agenda envio MQTT com atraso gaussiano (não bloqueante)."""
-    delay = max(0.0, random.gauss(COMM_DELAY_MEAN, COMM_DELAY_STD))
-    send_time = time.time() + delay
-    self._pending_msgs.append((send_time, topic, payload))
+    # Só anexa timestamp se for texto, nunca mexe em binário
+    if isinstance(payload, str) and "\n" not in payload and "pub_ts_ms=" not in payload:
+        payload = f"{payload};pub_ts_ms={pub_ts_ms}"
 
-def process_pending_msgs():
-    """Publica mensagens cujo tempo chegou."""
-    now = time.time()
-    ready = [m for m in self._pending_msgs if m[0] <= now]
-    for _, topic, payload in ready:
-        try:
-            self.client.publish(topic, payload, qos=MQTT_QOS)
-        except Exception as e:
-            print(f"[WARN] Falha ao publicar {topic}: {e}")
-    self._pending_msgs[:] = [m for m in self._pending_msgs if m[0] > now]
+    client.publish(topic, payload, qos=MQTT_QOS)
+    return pub_ts_ms
 
-# ----------------------------------------------------------------------------- #
-# MQTT callbacks
-# ----------------------------------------------------------------------------- #
+# -----------------------------------------------------------------------------
+# Callbacks MQTT
+# -----------------------------------------------------------------------------
 def on_connect(client, userdata, flags, reason_code, properties):
     sim = require('sim')
     if reason_code == 0:
         sim.addLog(sim.verbosity_scriptinfos, "AGV: Conectado ao MQTT.")
         client.subscribe("fleet_manager/target_position", qos=MQTT_QOS)
+        sim.addLog(sim.verbosity_scriptinfos, "AGV: Subscrito em fleet_manager/target_position")
     else:
         sim.addLog(sim.verbosity_errors, f"AGV: Falha na conexão. Código: {reason_code}")
 
@@ -104,42 +101,30 @@ def on_disconnect(client, userdata, flags, reason_code, properties):
 
 def on_message(client, userdata, msg):
     sim = require('sim')
+    sim.addLog(sim.verbosity_scriptinfos, f"MQTT msg recebida em {msg.topic} ({len(msg.payload)} bytes)")
     if msg.topic == "fleet_manager/target_position":
         target = TargetPosition()
         target.ParseFromString(msg.payload)
         self.target_position = target
         sim.addLog(sim.verbosity_scriptinfos,
-                   f"AGV: Target recebido: x={target.x:.3f}, y={target.y:.3f}, θ={target.theta:.3f}")
+                   f"AGV: Target recebido: x={target.x:.3f}, y={target.y:.3f}, theta={target.theta:.3f}")
 
-# ----------------------------------------------------------------------------- #
+# -----------------------------------------------------------------------------
 # CoppeliaSim sysCalls
-# ----------------------------------------------------------------------------- #
+# -----------------------------------------------------------------------------
 def sysCall_init():
     sim = require('sim')
 
-    # --- Diretório base do cenário (lido do orchestrador) ---
-    project_root = "C:\\Users\\geova\\repos\\mestrado"
-    try:
-        current_run_file = os.path.join(project_root, "logs", "experiments", "current_run.txt")
-        if os.path.exists(current_run_file):
-            with open(current_run_file, "r", encoding="utf-8") as f:
-                base_dir = f.read().strip()
-        else:
-            base_dir = os.path.join(project_root, "logs", "experiments", "manual_run")
-        self.log_dir = os.path.join(base_dir, "agv_logs")
-    except Exception as e:
-        self.log_dir = os.path.join(project_root, "logs", "agv_logs_fallback")
-        print(f"[WARN] Falha ao obter caminho do cenário: {e}")
-
-    os.makedirs(self.log_dir, exist_ok=True)
-    sim.addLog(sim.verbosity_scriptinfos, f"[AGV] Salvando logs em: {self.log_dir}")
-
-    # Identidade e handles
+    # Identidade (prefixo dos tópicos de telemetria)
     self.client_name = "agv"
+
+    # Handles
     self.pioneer    = sim.getObject('.')
     self.hokuyo     = sim.getObject("../Hokuyo")
     self.motorLeft  = sim.getObject("../leftMotor")
     self.motorRight = sim.getObject("../rightMotor")
+
+    # Estado
     self.target_position = None
 
     # MQTT
@@ -153,37 +138,50 @@ def sysCall_init():
 def sysCall_sensing():
     sim = require('sim')
 
-    # Telemetria
+    # Telemetria do robô
     linear_velocity, angular_velocity = sim.getObjectVelocity(self.pioneer)
     position    = sim.getObjectPosition(self.pioneer, -1)
-    orientation = sim.getObjectQuaternion(self.pioneer, -1)
+    orientation = sim.getObjectQuaternion(self.pioneer, -1)  # quaternion completo
     euler       = sim.getObjectOrientation(self.pioneer, -1)
     theta       = euler[2]
     left_w      = sim.getJointVelocity(self.motorLeft)
     right_w     = sim.getJointVelocity(self.motorRight)
 
-    # --- Publica IMU ---
+    # --- Publica IMU (linear + angular velocity)
     imu_msg = proto.sensor_data_struct_pb2.IMUData(
         linear_velocity=list(linear_velocity),
         angular_velocity=list(angular_velocity),
     )
-    mqtt_publish_delayed(self.client, f"{self.client_name}/imu/linearVelocity", imu_msg.SerializeToString())
-    mqtt_publish_delayed(self.client, f"{self.client_name}/imu/angularVelocity", imu_msg.SerializeToString())
+    mqtt_publish_ts(self.client, f"{self.client_name}/imu/linearVelocity", imu_msg.SerializeToString())
+    mqtt_publish_ts(self.client, f"{self.client_name}/imu/angularVelocity", imu_msg.SerializeToString())
 
-    # --- Publica Odometria ---
+    # --- Publica Odometria (pose = x,y,z,qx,qy,qz,qw) e velocidades das rodas
     odom_msg = proto.sensor_data_struct_pb2.OdometryData(
         pose=list(position + orientation),
         wheel_velocities=[left_w, right_w],
     )
-    mqtt_publish_delayed(self.client, f"{self.client_name}/odometry/pose", odom_msg.SerializeToString())
-    mqtt_publish_delayed(self.client, f"{self.client_name}/odometry/wheel_vel", odom_msg.SerializeToString())
+    mqtt_publish_ts(self.client, f"{self.client_name}/odometry/pose", odom_msg.SerializeToString())
+    mqtt_publish_ts(self.client, f"{self.client_name}/odometry/wheel_vel", odom_msg.SerializeToString())
 
     # --- Logs CSV padronizados ---
     t = now_t()
-    log_row(os.path.join(self.log_dir, "odom.csv"),   ["t", "x", "y", "theta"], [t, position[0], position[1], theta])
-    log_row(os.path.join(self.log_dir, "wheels.csv"), ["t", "wl", "wr"], [t, left_w, right_w])
+
+    # odom.csv
+    log_row(os.path.join(log_dir, "odom.csv"),
+            ["t", "x", "y", "theta"],
+            [t, position[0], position[1], theta])
+
+    # wheels.csv
+    log_row(os.path.join(log_dir, "wheels.csv"),
+            ["t", "wl", "wr"],
+            [t, left_w, right_w])
+
+    # imu.csv
+    ax, ay, az = 0.0, 0.0, 0.0
     gx, gy, gz = angular_velocity
-    log_row(os.path.join(self.log_dir, "imu.csv"), ["t", "ax", "ay", "az", "gx", "gy", "gz"], [t, 0.0, 0.0, 0.0, gx, gy, gz])
+    log_row(os.path.join(log_dir, "imu.csv"),
+            ["t", "ax", "ay", "az", "gx", "gy", "gz"],
+            [t, ax, ay, az, gx, gy, gz])
 
     # --- Lidar (opcional) ---
     data_string = sim.readCustomDataBlock(self.hokuyo, 'LIDAR_SCAN')
@@ -194,6 +192,7 @@ def sysCall_sensing():
         angle_start = -scanning_angle / 2
         angle_increment = scanning_angle / num_points if num_points > 0 else 0
         max_dist = 6.0
+
         lidar_msg = proto.sensor_data_struct_pb2.LidarScan(
             angle_min=angle_start,
             angle_max=angle_start + scanning_angle,
@@ -205,10 +204,7 @@ def sysCall_sensing():
             ranges=ranges,
             intensities=[1.0 if r < max_dist else 0.0 for r in ranges],
         )
-        mqtt_publish_delayed(self.client, f"{self.client_name}/sensor/ranges", lidar_msg.SerializeToString())
-
-    # processa mensagens atrasadas
-    process_pending_msgs()
+        mqtt_publish_ts(self.client, f"{self.client_name}/sensor/ranges", lidar_msg.SerializeToString())
 
 def sysCall_actuation():
     sim = require('sim')
@@ -231,7 +227,7 @@ def sysCall_actuation():
         right_velocity = 0.0
     else:
         target_theta = math.atan2(dy, dx)
-        diff_theta = (target_theta - theta + math.pi) % (2 * math.pi) - math.pi
+        diff_theta = normalize_angle(target_theta - theta)
         linear_speed  = 0.4 if abs(diff_theta) < 0.4 else 0.0
         angular_speed = max(-1.2, min(1.2, diff_theta))
         left_velocity  = (linear_speed - angular_speed * WHEEL_BASE / 2) / WHEEL_RADIUS

@@ -31,7 +31,7 @@ class ExperimentManager:
         self.validation_log  = Path(validation_log)
         self.metric_columns  = metric_columns
         self.scenario_csv    = Path(scenario_csv)
-        self.poll_dt         = 0.2  # intervalo de retry em segundos
+        self.poll_dt         = 0.2  # intervalo de retry (s)
 
         # prepara o CSV de cenário (header)
         self.scenario_csv.parent.mkdir(parents=True, exist_ok=True)

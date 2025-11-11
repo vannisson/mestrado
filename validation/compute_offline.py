@@ -1,10 +1,12 @@
 import os
 import sys
+from pathlib import Path
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 
-# Adiciona o caminho para o repositório “mestrado” onde está validation.metrics
-sys.path.append("C:\\Users\\geova\\repos\\mestrado")
+# --- Caminho base do projeto ---
+sys.path.append(r"C:\Users\geova\repos\mestrado")
 
 from validation.metrics import (
     compute_mse,
@@ -12,83 +14,123 @@ from validation.metrics import (
     compute_mape,
     compute_dtw,
     compute_dtw_and_path_length,
-    compute_dtw_normalized
+    compute_dtw_normalized,
+    pearson_corr,
+    discrete_frechet_distance,
+    edr_distance,
+    lag_ms,
 )
 
-def load_series_from_csv(csv_path: str) -> np.ndarray:
-    """
-    Lê um CSV que contém uma série temporal (possivelmente com coluna 'timestamp' + várias colunas numéricas)
-    e retorna um array 1D concatenando todas as colunas numéricas (exclui 'timestamp' se existir).
-    """
+FS_HZ = 20.0
+ROOT = Path(r"C:\Users\geova\repos\mestrado")
+agv_dir  = ROOT / "logs" / "experiments" / "cenario_montecarlo_20251110_190543" / "agv_logs"
+twin_dir = ROOT / "logs" / "experiments" / "cenario_montecarlo_20251110_190543" / "twin_logs"
+out_dir  = ROOT / "logs" / "experiments" / "cenario_montecarlo_20251110_190543" / "offline_compare"
+out_dir.mkdir(parents=True, exist_ok=True)
+out_csv  = out_dir / "metrics.csv"
+
+# ---------------------------------------------------------------------------
+# Carregamento e alinhamento
+# ---------------------------------------------------------------------------
+def load_pose_csv(csv_path: Path) -> pd.DataFrame:
+    """Lê CSV de odometria (t,x,y,theta)."""
     df = pd.read_csv(csv_path)
-    if "timestamp" in df.columns:
-        df = df.drop(columns=["timestamp"])
-    return df.to_numpy(dtype=np.float32).flatten()
+    if "t" not in df.columns:
+        raise ValueError(f"{csv_path} não contém coluna 't'.")
+    return df
 
-def compute_metrics_for_all(ref_dir: str, test_dir: str):
-    """
-    Para cada arquivo CSV no diretório ref_dir, encontra o arquivo de mesmo nome em test_dir,
-    carrega as duas séries e imprime:
-      • MSE
-      • MAE
-      • MAPE
-      • DTW cru (custo total)
-      • DTW médio (normalizado)
-    """
-    ref_files = {f for f in os.listdir(ref_dir) if f.endswith(".csv")}
-    test_files = {f for f in os.listdir(test_dir) if f.endswith(".csv")}
+def interp_to_ref(ref: pd.DataFrame, test: pd.DataFrame) -> pd.DataFrame:
+    """Interpola test para ter os mesmos timestamps de ref."""
+    out = pd.DataFrame({"t": ref["t"]})
+    for c in [c for c in test.columns if c != "t"]:
+        out[c] = np.interp(ref["t"], test["t"], test[c])
+    return out
 
-    common_files = sorted(list(ref_files.intersection(test_files)))
-    if not common_files:
-        print("Nenhum CSV correspondente encontrado entre:\n  •", ref_dir, "\n  •", test_dir)
+# ---------------------------------------------------------------------------
+# Cálculo das métricas entre dois DataFrames (ref = AGV, test = Twin)
+# ---------------------------------------------------------------------------
+def compute_all_metrics(ref: pd.DataFrame, test: pd.DataFrame) -> dict:
+    """Calcula todas as métricas relevantes para o estudo."""
+    x_r, y_r = ref["x"].to_numpy(), ref["y"].to_numpy()
+    x_t, y_t = test["x"].to_numpy(), test["y"].to_numpy()
+
+    # --- Métricas simples (1D concatenado) ---
+    ref_flat = np.concatenate([x_r, y_r])
+    test_flat = np.concatenate([x_t, y_t])
+    mse_val  = compute_mse(ref_flat, test_flat)
+    rmse_val = float(np.sqrt(mse_val))
+    mae_val  = compute_mae(ref_flat, test_flat)
+    mape_val = compute_mape(ref_flat, test_flat)
+
+    # --- DTW (2D trajetória) ---
+    A_xy = np.vstack([x_r, y_r]).T
+    B_xy = np.vstack([x_t, y_t]).T
+    dtw_cru = compute_dtw(A_xy, B_xy)
+    total_cost, path_len = compute_dtw_and_path_length(A_xy, B_xy)
+    dtw_norm = compute_dtw_normalized(A_xy, B_xy)
+
+    # --- Fréchet e EDR ---
+    frechet_xy = discrete_frechet_distance(A_xy, B_xy)
+    edr_x = edr_distance(x_r, x_t)
+    edr_y = edr_distance(y_r, y_t)
+
+    # --- Correlação e Lag ---
+    pearson_x = pearson_corr(x_r, x_t)
+    pearson_y = pearson_corr(y_r, y_t)
+    lag_x_ms = lag_ms(x_r, x_t, FS_HZ)
+    lag_y_ms = lag_ms(y_r, y_t, FS_HZ)
+
+    return dict(
+        mse=mse_val,
+        rmse=rmse_val,
+        mae=mae_val,
+        mape=mape_val,
+        dtw_cru=dtw_cru,
+        dtw_norm=dtw_norm,
+        frechet_xy=frechet_xy,
+        edr_x=edr_x,
+        edr_y=edr_y,
+        pearson_x=pearson_x,
+        pearson_y=pearson_y,
+        lag_x_ms=lag_x_ms,
+        lag_y_ms=lag_y_ms,
+    )
+
+# ---------------------------------------------------------------------------
+# Loop principal
+# ---------------------------------------------------------------------------
+def compute_offline(ref_dir: Path, test_dir: Path):
+    ref_file = ref_dir / "odom.csv"
+    test_file = test_dir / "odom.csv"
+    if not ref_file.exists() or not test_file.exists():
+        print(f"[compute_offline] Faltando odom.csv em {ref_dir} ou {test_dir}")
         return
 
-    for filename in common_files:
-        ref_path = os.path.join(ref_dir, filename)
-        test_path = os.path.join(test_dir, filename)
+    ref = load_pose_csv(ref_file)
+    test = load_pose_csv(test_file)
+    test_interp = interp_to_ref(ref, test)
+    metrics = compute_all_metrics(ref, test_interp)
 
-        try:
-            ref_array = load_series_from_csv(ref_path)
-            test_array = load_series_from_csv(test_path)
+    df = pd.DataFrame([metrics])
+    df.to_csv(out_csv, index=False)
+    print(f"[compute_offline] Métricas salvas em: {out_csv}")
 
-            # Ajusta tamanho se necessário
-            if ref_array.shape != test_array.shape:
-                min_len = min(len(ref_array), len(test_array))
-                ref_array = ref_array[:min_len]
-                test_array = test_array[:min_len]
+    # --- Resumo estatístico ---
+    summary_path = out_dir / "summary.csv"
+    df.describe(percentiles=[0.05, 0.5, 0.95]).to_csv(summary_path)
+    print(f"[compute_offline] Resumo salvo em: {summary_path}")
 
-            # Cálculos de métricas
-            mse_value = compute_mse(ref_array, test_array)
-            mae_value = compute_mae(ref_array, test_array)
-            mape_value = compute_mape(ref_array, test_array)
-            dtw_cru = compute_dtw(ref_array.tolist(), test_array.tolist())
-            total_cost, path_len = compute_dtw_and_path_length(ref_array.tolist(), test_array.tolist())
-            dtw_medio = compute_dtw_normalized(ref_array.tolist(), test_array.tolist())
+    # --- Histogramas automáticos ---
+    for col in df.columns:
+        fig, ax = plt.subplots(figsize=(5, 3))
+        ax.hist(df[col], bins=10, color="#56B4E9", edgecolor="black", alpha=0.7)
+        ax.set_title(f"Histograma – {col}")
+        ax.grid(True, ls="--", alpha=0.5)
+        fig.tight_layout()
+        fig.savefig(out_dir / f"hist_{col}.png", dpi=150)
+        plt.close(fig)
+    print(f"[compute_offline] Histogramas salvos em: {out_dir}")
 
-            print(f"Arquivo: '{filename}'")
-            print(f"  MSE: {mse_value:.5f}")
-            print(f"  MAE: {mae_value:.5f}")
-            print(f"  MAPE: {mape_value:.5f}%")
-            print(f"  DTW cru (total): {dtw_cru:.5f}")
-            print(f"  DTW passos: {path_len}")
-            print(f"  DTW médio (normalizado): {dtw_medio:.5f}")
-            print()
-        except Exception as e:
-            print(f"[Erro] ao processar '{filename}': {e}")
-
-
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    """
-    Ajuste os caminhos abaixo para apontar às pastas 'agv_logs' e 'twin_logs' do seu projeto.
-    """
-    agv_dir = r"C:\Users\geova\repos\mestrado\logs\agv_logs"
-    twin_dir = r"C:\Users\geova\repos\mestrado\logs\twin_logs"
-
-    if not os.path.isdir(agv_dir):
-        print(f"Pasta de referência (agv_logs) não encontrada: {agv_dir}")
-        sys.exit(1)
-    if not os.path.isdir(twin_dir):
-        print(f"Pasta de teste (twin_logs) não encontrada: {twin_dir}")
-        sys.exit(1)
-
-    compute_metrics_for_all(agv_dir, twin_dir)
+    compute_offline(agv_dir, twin_dir)

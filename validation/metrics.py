@@ -1,231 +1,369 @@
+# metrics.py
+# =============================================================================
+# Métricas de validação para DT/AGV
+# - MAE, MSE, RMSE
+# - MAPE (robusta perto de zero)
+# - DTW com janela (Sakoe–Chiba)
+# - Estimativa de defasagem (lag) via correlação cruzada normalizada
+#
+# Uso típico:
+#   from metrics import mae, mse, rmse, mape, dtw_cost, lag_xcorr_ms, 
+# =============================================================================
+
+from typing import Callable, Iterable, Optional
 import numpy as np
-
-def compute_mse(ref, test):
-    try:
-        ref_array = np.array(ref, dtype=np.float32)
-        test_array = np.array(test, dtype=np.float32)
-
-        if ref_array.shape != test_array.shape:
-            min_len = min(len(ref_array), len(test_array))
-            ref_array = ref_array[:min_len]
-            test_array = test_array[:min_len]
-
-        return np.mean((ref_array - test_array) ** 2)
-    except Exception as e:
-        print(f"[Metrics] Error computing MSE: {e}")
-        return float('inf')
+import math
 
 
-def compute_mae(ref, test):
-    try:
-        ref_array = np.array(ref, dtype=np.float32)
-        test_array = np.array(test, dtype=np.float32)
+# ------------------------------ Básicas ------------------------------------- #
 
-        if ref_array.shape != test_array.shape:
-            min_len = min(len(ref_array), len(test_array))
-            ref_array = ref_array[:min_len]
-            test_array = test_array[:min_len]
-
-        return np.mean(np.abs(ref_array - test_array))
-    except Exception as e:
-        print(f"[Metrics] Error computing MAE: {e}")
-        return float('inf')
-
-
-def compute_mape(ref, test, eps=1e-6):
-    try:
-        ref_array = np.array(ref, dtype=np.float32)
-        test_array = np.array(test, dtype=np.float32)
-
-        if ref_array.shape != test_array.shape:
-            min_len = min(len(ref_array), len(test_array))
-            ref_array = ref_array[:min_len]
-            test_array = test_array[:min_len]
-
-        # evita divisão por zero
-        ref_array = np.where(ref_array == 0, eps, ref_array)
-        return np.mean(np.abs((ref_array - test_array) / ref_array)) * 100
-    except Exception as e:
-        print(f"[Metrics] Error computing MAPE: {e}")
-        return float('inf')
-
-
-# ==================================================================================
-#                               DTW BRUTO (compute_dtw)
-# ==================================================================================
-# Mantemos sua função original: devolve apenas o custo total acumulado (float).
-def compute_dtw(seq1, seq2):
+def mae(x: Iterable[float], y: Iterable[float]) -> float:
     """
-    Calcula a distância DTW “bruta” (soma acumulada dos menores custos) entre duas sequências seq1 e seq2.
-    Se seq1/seq2 for lista de escalares (1-D), faz DTW em 1-D (custo = |x - y|).
-    Se seq1/seq2 for lista de vetores (2-D), faz DTW multidimensional (custo = ||v1 - v2||).
-    Retorna um float com o valor da soma acumulada de menor custo (dtw_mat[n,m]).
+    Mean Absolute Error (mesmas unidades do sinal).
     """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    return float(np.mean(np.abs(x - y)))
 
-    try:
-        arr1 = np.array(seq1, dtype=np.float32)
-        arr2 = np.array(seq2, dtype=np.float32)
 
-        # ---------------------------------------------
-        # Caso 1: ambas 1-D (vetor de escalares)
-        # ---------------------------------------------
-        if arr1.ndim == 1 and arr2.ndim == 1:
-            n, m = len(arr1), len(arr2)
-            dtw_mat = np.full((n + 1, m + 1), np.inf, dtype=np.float32)
-            dtw_mat[0, 0] = 0.0
+def mse(x: Iterable[float], y: Iterable[float]) -> float:
+    """
+    Mean Squared Error.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    return float(np.mean((x - y) ** 2))
 
-            for i in range(1, n + 1):
-                for j in range(1, m + 1):
-                    cost = abs(arr1[i - 1] - arr2[j - 1])
-                    dtw_mat[i, j] = cost + min(
-                        dtw_mat[i - 1, j],    # inserção
-                        dtw_mat[i, j - 1],    # deleção
-                        dtw_mat[i - 1, j - 1] # match diagonal
-                    )
-            return float(dtw_mat[n, m])
 
-        # ---------------------------------------------
-        # Caso 2: ambas 2-D (lista de vetores ou array 2-D)
-        # ---------------------------------------------
-        elif arr1.ndim == 2 and arr2.ndim == 2:
-            n, d1 = arr1.shape
-            m, d2 = arr2.shape
-            if d1 != d2:
-                raise ValueError(f"Dimensionalidade incompatível: seq1 tem dimensão {d1}, seq2 tem {d2}")
+def rmse(x: Iterable[float], y: Iterable[float]) -> float:
+    """
+    Root Mean Squared Error (penaliza mais outliers).
+    """
+    return float(np.sqrt(mse(x, y)))
 
-            dtw_mat = np.full((n + 1, m + 1), np.inf, dtype=np.float32)
-            dtw_mat[0, 0] = 0.0
 
-            for i in range(1, n + 1):
-                for j in range(1, m + 1):
-                    cost = np.linalg.norm(arr1[i - 1] - arr2[j - 1])
-                    dtw_mat[i, j] = cost + min(
-                        dtw_mat[i - 1, j],
-                        dtw_mat[i, j - 1],
-                        dtw_mat[i - 1, j - 1]
-                    )
-            return float(dtw_mat[n, m])
+def mape(
+    x: Iterable[float],
+    y: Iterable[float],
+    eps: float = 1e-6,
+) -> float:
+    """
+    Mean Absolute Percentage Error (robusta perto de zero).
 
+    - Ignora amostras onde |x| <= eps para evitar explosão percentual
+      em regiões próximas de zero.
+    - Retorna 0.0 se não houver amostras válidas após o filtro.
+
+    Retorno em PERCENTUAL (0–100).
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    mask = np.abs(x) > eps
+    if not np.any(mask):
+        return 0.0
+    return float(100.0 * np.mean(np.abs(x[mask] - y[mask]) / np.abs(x[mask])))
+
+
+# ------------------------------ Defasagem ----------------------------------- #
+
+def lag_xcorr_ms(
+    x: Iterable[float],
+    y: Iterable[float],
+    fs_hz: float,
+) -> float:
+    """
+    Estima o lag (em milissegundos) que maximiza a correlação cruzada normalizada.
+
+    - Remove média de cada série.
+    - Normaliza pela norma (correlação de correlação).
+    - Retorna lag > 0 se y está ATRASADO em relação a x (y(t) ≈ x(t - lag)).
+
+    Parâmetros
+    ----------
+    x, y : sequências numéricas (mesmo comprimento, amostradas à mesma taxa)
+    fs_hz : float
+        Frequência de amostragem em Hz.
+
+    Retorna
+    -------
+    float
+        Defasagem em milissegundos.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if len(x) == 0 or len(y) == 0:
+        return 0.0
+
+    x = x - np.mean(x)
+    y = y - np.mean(y)
+    denom = np.linalg.norm(x) * np.linalg.norm(y)
+    if denom == 0:
+        return 0.0
+
+    corr = np.correlate(x, y, mode='full') / denom
+    k = int(np.argmax(corr))
+    lag_samples = k - (len(x) - 1)
+
+    # >>> ajuste para cumprir a docstring:
+    lag_seconds = (-lag_samples) / float(fs_hz)
+    return float(lag_seconds * 1000.0)
+
+# ==========================
+# Bloco de compatibilidade
+# ==========================
+
+def dtw_cost_and_path_length_nd(
+    X: Iterable[Iterable[float]],
+    Y: Iterable[Iterable[float]],
+    window: Optional[int] = None,
+    metric: str = "euclidean",
+    weights: Optional[Iterable[float]] = None,
+) -> tuple[float, int]:
+    """
+    Retorna (custo_total_DTW, tamanho_do_caminho) para séries multivariadas.
+    Cada amostra é vetor em R^D. Usa norma -> custo escalar.
+    """
+    X = np.asarray(X, dtype=float)
+    Y = np.asarray(Y, dtype=float)
+    if X.ndim == 1: X = X[:, None]
+    if Y.ndim == 1: Y = Y[:, None]
+
+    n, Dx = X.shape
+    m, Dy = Y.shape
+    if Dx != Dy:
+        raise ValueError(f"Dimensão incompatível: {Dx} vs {Dy}")
+
+    if n == 0 and m == 0:
+        return (0.0, 0)
+    if n == 0 or m == 0:
+        # custo = soma das normas das amostras remanescentes; caminho = n+m
+        return (float(np.sum(np.linalg.norm(X, axis=1)) + np.sum(np.linalg.norm(Y, axis=1))), int(n + m))
+
+    if window is None:
+        window = max(n, m)
+    window = max(int(window), abs(n - m))
+
+    if weights is not None:
+        w = np.asarray(weights, dtype=float).reshape(1, -1)
+        if w.shape[1] != Dx:
+            raise ValueError("weights deve ter mesmo D das séries")
+    else:
+        w = None
+
+    def point_cost(a, b) -> float:
+        d = a - b
+        if w is not None:
+            d = d * w
+        if metric == "manhattan":
+            return float(np.sum(np.abs(d)))
+        return float(np.linalg.norm(d))  # euclidiana
+
+    Dacc = np.full((n + 1, m + 1), np.inf, dtype=np.float64)
+    Dacc[0, 0] = 0.0
+
+    for i in range(1, n + 1):
+        j_start = max(1, i - window)
+        j_end   = min(m, i + window)
+        xi = X[i - 1]
+        for j in range(j_start, j_end + 1):
+            c = point_cost(xi, Y[j - 1])
+            Dacc[i, j] = c + min(Dacc[i - 1, j], Dacc[i, j - 1], Dacc[i - 1, j - 1])
+
+    # backtracking para comprimento do caminho
+    i, j = n, m
+    path_len = 0
+    while i > 0 or j > 0:
+        path_len += 1
+        up   = Dacc[i - 1, j]     if i > 0 else np.inf
+        left = Dacc[i, j - 1]     if j > 0 else np.inf
+        diag = Dacc[i - 1, j - 1] if (i > 0 and j > 0) else np.inf
+        if diag <= up and diag <= left:
+            i -= 1; j -= 1
+        elif up <= left:
+            i -= 1
         else:
-            raise ValueError(f"Sequências de forma incompatível: seq1.ndim={arr1.ndim}, seq2.ndim={arr2.ndim}")
+            j -= 1
 
-    except Exception as e:
-        print(f"[Metrics] Error computing DTW: {e}")
-        return float("inf")
+    return float(Dacc[n, m]), int(path_len)
 
 
-# ==================================================================================
-#                      DTW BRUTO + PATH LENGTH (compute_dtw_and_path_length)
-# ==================================================================================
-def compute_dtw_and_path_length(seq1, seq2):
+def dtw_cost_nd(
+    X: Iterable[Iterable[float]],
+    Y: Iterable[Iterable[float]],
+    window: Optional[int] = None,
+    metric: str = "euclidean",
+    weights: Optional[Iterable[float]] = None,
+) -> float:
+    total, _ = dtw_cost_and_path_length_nd(X, Y, window=window, metric=metric, weights=weights)
+    return float(total)
+
+
+def dtw_cost_normalized_nd(
+    X: Iterable[Iterable[float]],
+    Y: Iterable[Iterable[float]],
+    window: Optional[int] = None,
+    metric: str = "euclidean",
+    weights: Optional[Iterable[float]] = None,
+) -> float:
+    total, L = dtw_cost_and_path_length_nd(X, Y, window=window, metric=metric, weights=weights)
+    if L <= 0:
+        return 0.0
+    return float(total / L)
+
+# =============================================================================
+# MÉTRICAS ADICIONAIS DE SINCRONIZAÇÃO TEMPORAL E FIDELIDADE ESPACIAL
+# =============================================================================
+def windowed_dtw(
+    x: Iterable[float],
+    y: Iterable[float],
+    fs_hz: float,
+    window_s: float = 1.0,
+    step_s: Optional[float] = None,
+) -> tuple[list[float], list[float]]:
     """
-    Calcula o DTW “cru” (soma acumulada) E conta quantos passos (i,j) compõem o caminho ótimo.
-    Retorna uma tupla: (dtw_total_cost, path_length).
+    Calcula o DTW normalizado em janelas deslizantes.
+    Retorna (tempos_centro_janela, lista_dtw_valores).
 
-    - seq1, seq2 podem ser listas de escalares (1-D) ou listas de vetores (2-D).
-    - path_length é o número de pares (i,j) no caminho de warping de menor custo.
+    Útil para observar variação temporal da sincronização (jitter).
     """
+    step_s = step_s or (window_s / 2.0)
+    win = int(window_s * fs_hz)
+    step = int(step_s * fs_hz)
+    if win <= 0 or len(x) < win or len(y) < win:
+        return [], []
+    vals, times = [], []
+    for i in range(0, len(x) - win, step):
+        seg_x = x[i:i+win]
+        seg_y = y[i:i+win]
+        t_center = (i + win/2) / fs_hz
+        try:
+            val = dtw_cost_normalized_nd(seg_x, seg_y)
+        except Exception:
+            val = math.nan
+        vals.append(val)
+        times.append(t_center)
+    return times, vals
 
-    try:
-        arr1 = np.array(seq1, dtype=np.float32)
-        arr2 = np.array(seq2, dtype=np.float32)
 
-        # ---------------------------------------------
-        # Caso 1: sequência unidimensional (vetor de escalares)
-        # ---------------------------------------------
-        if arr1.ndim == 1 and arr2.ndim == 1:
-            n, m = len(arr1), len(arr2)
-            dtw_mat = np.full((n + 1, m + 1), np.inf, dtype=np.float32)
-            dtw_mat[0, 0] = 0.0
+def lag_variance(
+    x: Iterable[float],
+    y: Iterable[float],
+    fs_hz: float,
+    window_s: float = 1.0,
+    step_s: Optional[float] = None,
+) -> tuple[float, float]:
+    """
+    Mede a estabilidade temporal da sincronização.
+    Retorna (média_ms, desvio_padrao_ms) dos lags em janelas.
 
-            for i in range(1, n + 1):
-                for j in range(1, m + 1):
-                    cost = abs(arr1[i - 1] - arr2[j - 1])
-                    dtw_mat[i, j] = cost + min(
-                        dtw_mat[i - 1, j],
-                        dtw_mat[i, j - 1],
-                        dtw_mat[i - 1, j - 1]
-                    )
+    Se o desvio for alto -> jitter temporal significativo.
+    """
+    step_s = step_s or (window_s / 2.0)
+    win = int(window_s * fs_hz)
+    step = int(step_s * fs_hz)
+    if win <= 0 or len(x) < win or len(y) < win:
+        return (0.0, 0.0)
+    lags = []
+    for i in range(0, len(x) - win, step):
+        seg_x = x[i:i+win]
+        seg_y = y[i:i+win]
+        lag = lag_xcorr_ms(seg_x, seg_y, fs_hz)
+        lags.append(lag)
+    if not lags:
+        return (0.0, 0.0)
+    return float(np.mean(lags)), float(np.std(lags))
 
-            # Backtracking para contar quantos passos (i,j) foram usados
-            i, j = n, m
-            path_len = 0
-            while i > 0 or j > 0:
-                path_len += 1
-                escolha = np.argmin((
-                    dtw_mat[i - 1, j],    # de cima
-                    dtw_mat[i, j - 1],    # da esquerda
-                    dtw_mat[i - 1, j - 1] # diagonal
-                ))
-                if escolha == 0:
-                    i -= 1
-                elif escolha == 1:
-                    j -= 1
-                else:
-                    i -= 1
-                    j -= 1
 
-            return float(dtw_mat[n, m]), path_len
+def pearson_corr(
+    x: Iterable[float],
+    y: Iterable[float],
+) -> float:
+    """
+    Coeficiente de correlação de Pearson (ρ).
+    Mede a coerência linear entre as séries.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if len(x) != len(y) or len(x) < 2:
+        return 0.0
+    x_m, y_m = np.mean(x), np.mean(y)
+    num = np.sum((x - x_m) * (y - y_m))
+    den = math.sqrt(np.sum((x - x_m)**2) * np.sum((y - y_m)**2))
+    return float(num / den) if den != 0 else 0.0
 
-        # ---------------------------------------------
-        # Caso 2: sequência bidimensional (lista de vetores)
-        # ---------------------------------------------
-        elif arr1.ndim == 2 and arr2.ndim == 2:
-            n, d1 = arr1.shape
-            m, d2 = arr2.shape
-            if d1 != d2:
-                raise ValueError(f"Dimensões incompatíveis: seq1 tem {d1}, seq2 tem {d2}")
 
-            dtw_mat = np.full((n + 1, m + 1), np.inf, dtype=np.float32)
-            dtw_mat[0, 0] = 0.0
+def discrete_frechet_distance(P: Iterable[Iterable[float]], Q: Iterable[Iterable[float]]) -> float:
+    """
+    Distância de Fréchet discreta entre duas trajetórias (x,y).
+    Mede similaridade espacial independente do tempo.
+    """
+    P = np.asarray(P, dtype=float)
+    Q = np.asarray(Q, dtype=float)
+    n, m = len(P), len(Q)
+    ca = np.full((n, m), -1.0)
 
-            for i in range(1, n + 1):
-                for j in range(1, m + 1):
-                    cost = np.linalg.norm(arr1[i - 1] - arr2[j - 1])
-                    dtw_mat[i, j] = cost + min(
-                        dtw_mat[i - 1, j],
-                        dtw_mat[i, j - 1],
-                        dtw_mat[i - 1, j - 1]
-                    )
+    def dist(i, j):
+        return np.linalg.norm(P[i] - Q[j])
 
-            # Backtracking para contar passos
-            i, j = n, m
-            path_len = 0
-            while i > 0 or j > 0:
-                path_len += 1
-                escolha = np.argmin((
-                    dtw_mat[i - 1, j],
-                    dtw_mat[i, j - 1],
-                    dtw_mat[i - 1, j - 1]
-                ))
-                if escolha == 0:
-                    i -= 1
-                elif escolha == 1:
-                    j -= 1
-                else:
-                    i -= 1
-                    j -= 1
-
-            return float(dtw_mat[n, m]), path_len
-
+    def rec(i, j):
+        if ca[i, j] > -1:
+            return ca[i, j]
+        if i == 0 and j == 0:
+            ca[i, j] = dist(0, 0)
+        elif i > 0 and j == 0:
+            ca[i, j] = max(rec(i-1, 0), dist(i, 0))
+        elif i == 0 and j > 0:
+            ca[i, j] = max(rec(0, j-1), dist(0, j))
+        elif i > 0 and j > 0:
+            ca[i, j] = max(
+                min(rec(i-1, j), rec(i-1, j-1), rec(i, j-1)),
+                dist(i, j)
+            )
         else:
-            raise ValueError(f"Sequências com ndim incompatível: {arr1.ndim} vs {arr2.ndim}")
+            ca[i, j] = float("inf")
+        return ca[i, j]
 
-    except Exception as e:
-        print(f"[Metrics] Error computing DTW and path: {e}")
-        return float("inf"), 0
+    return float(rec(n-1, m-1))
 
 
-# ==================================================================================
-#                      DTW NORMALIZADO (compute_dtw_normalized)
-# ==================================================================================
-def compute_dtw_normalized(seq1, seq2):
+def edr_distance(
+    x: Iterable[float],
+    y: Iterable[float],
+    epsilon: float = 0.05,
+) -> float:
     """
-    Retorna o “DTW médio por passo”:
-      dtw_normalized = (custo total de DTW) / (número de passos no caminho).
-    Se path_len for zero ou ocorrer erro, retorna inf.
+    Edit Distance on Real sequences (EDR).
+    Tolerante a ruído, mede diferença estrutural entre séries.
     """
-    total_cost, path_len = compute_dtw_and_path_length(seq1, seq2)
-    if path_len <= 0:
-        return float("inf")
-    return total_cost / path_len
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    n, m = len(x), len(y)
+    if n == 0 or m == 0:
+        return float(max(n, m))
+    dp = np.zeros((n+1, m+1))
+    dp[:, 0] = np.arange(n+1)
+    dp[0, :] = np.arange(m+1)
+
+    for i in range(1, n+1):
+        for j in range(1, m+1):
+            cost = 0 if abs(x[i-1] - y[j-1]) <= epsilon else 1
+            dp[i, j] = min(
+                dp[i-1, j] + 1,      # deleção
+                dp[i, j-1] + 1,      # inserção
+                dp[i-1, j-1] + cost  # substituição
+            )
+    return float(dp[n, m])
+
+
+# ---- Aliases para compatibilidade com os outros módulos ----
+compute_mae  = mae
+compute_mse  = mse
+compute_rmse = rmse
+compute_mape = mape
+
+compute_dtw = dtw_cost_nd
+compute_dtw_normalized = dtw_cost_normalized_nd
+# nomes que os outros scripts esperam:
+compute_dtw_and_path_length = dtw_cost_and_path_length_nd
+compute_dtw_normalized      = dtw_cost_normalized_nd
+lag_ms = lag_xcorr_ms  # se alguém usar esse atalho

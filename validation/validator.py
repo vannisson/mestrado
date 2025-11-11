@@ -1,176 +1,211 @@
-from collections import deque
-import sys
-sys.path.append("C:\\Users\\geova\\repos\\mestrado")
+# validator.py
+# =============================================================================
+# Validator principal para comparar as séries temporais do AGV fonte e gêmeo.
+# - Alinha streams (odometria, rodas, IMU) por timestamp
+# - Calcula métricas MAE, RMSE, MAPE, DTW e lag
+# - Gera arquivos metrics.json e metrics.csv
+# =============================================================================
 
 import os
+import json
 import csv
-import logging
-import atexit
+from typing import Dict, Any, Tuple
 import numpy as np
-from datetime import datetime
-from paho.mqtt import client as mqtt
-
-from config.variables import VALIDATION_TOPICS, BROKER, PORT
-from proto.sensor_data_struct_pb2 import IMUData, OdometryData, LidarScan
-
-# Importa agora as três variantes de DTW:
-from validation.metrics import (
-    compute_mse,
-    compute_mae,
-    compute_mape,
-    compute_dtw,                  # DTW “cru” (soma acumulada)
-    compute_dtw_and_path_length,  # retorna (dtw_total, path_len)
-    compute_dtw_normalized        # DTW médio por passo
+import pandas as pd
+from metrics import (
+    mae, rmse, mape, dtw_cost, lag_xcorr_ms,
+    windowed_dtw, lag_variance, pearson_corr,
+    discrete_frechet_distance, edr_distance
 )
 
-REFERENCE = "digital_twin"
-TEST = "agv"
+# --------------------------------------------------------------------------- #
+# Funções utilitárias
+# --------------------------------------------------------------------------- #
 
-latest = {REFERENCE: {}, TEST: {}}
-first_scan = {REFERENCE: False, TEST: False}
-lidar_params = {REFERENCE: None, TEST: None}
-params_checked = False
-log_files = {}
+def _ensure_dir(path: str):
+    """Cria diretório se não existir."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
 
-# Buffers deslizantes, um para cada tópico/sufixo
-refBuffers = {}
-testBuffers = {}
 
-# --- Logging setup ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-# log_dir = os.path.join(os.getcwd(), "../logs", "validation")
-log_dir = os.path.join(os.getcwd(), "logs", "validation")
-os.makedirs(log_dir, exist_ok=True)
+def _resample(df: pd.DataFrame, dt: float, tcol: str = "t") -> pd.DataFrame:
+    """
+    Reamostra DataFrame para passo temporal fixo (interpolação linear).
+    Assume que df[tcol] está em segundos.
+    """
+    if tcol not in df.columns:
+        raise ValueError(f"Coluna de tempo '{tcol}' ausente em {df.columns}")
+    df = df.sort_values(tcol)
+    t0, t1 = df[tcol].iloc[0], df[tcol].iloc[-1]
+    grid = np.arange(t0, t1, dt)
+    out = {tcol: grid}
+    for col in df.columns:
+        if col == tcol:
+            continue
+        out[col] = np.interp(grid, df[tcol].to_numpy(), df[col].to_numpy())
+    return pd.DataFrame(out)
 
-# --- MQTT callbacks ---
-def on_connect(client, _, __, rc, ___):
-    if rc == 0:
-        logging.info("Connected to MQTT.")
-        for topic in VALIDATION_TOPICS:
-            for who in [REFERENCE, TEST]:
-                full = topic.replace("CLIENT", who)
-                client.subscribe(full)
-                logging.info(f"Subscribed: {full}")
-    else:
-        logging.error(f"Failed to connect. Code: {rc}")
 
-def on_message(client, _, msg):
-    global params_checked
-    topic = msg.topic
-    who = REFERENCE if topic.startswith(REFERENCE) else TEST if topic.startswith(TEST) else None
-    if not who:
-        return
+def _pair_metrics(
+    ref_df: pd.DataFrame,
+    twin_df: pd.DataFrame,
+    dt: float,
+    fs_hz: float,
+    dtw_window: int = None,
+) -> Dict[str, Dict[str, float]]:
+    """
+    Calcula métricas entre dois DataFrames alinhados temporalmente.
+    Cada coluna (exceto 't') é considerada uma variável a ser comparada.
 
-    suffix = topic.split("/", 1)[1]
-    try:
-        if "imu/linearVelocity" in suffix:
-            latest[who][suffix] = list(IMUData().FromString(msg.payload).linear_velocity)
-        elif "imu/angularVelocity" in suffix:
-            latest[who][suffix] = list(IMUData().FromString(msg.payload).angular_velocity)
-        elif "odometry/pose" in suffix:
-            latest[who][suffix] = list(OdometryData().FromString(msg.payload).pose)
-        elif "odometry/wheel_vel" in suffix:
-            latest[who][suffix] = list(OdometryData().FromString(msg.payload).wheel_velocities)
-        elif "sensor/ranges" in suffix:
-            scan = LidarScan()
-            scan.ParseFromString(msg.payload)
-            latest[who]["sensor/ranges"] = list(scan.ranges)
-            latest[who]["sensor/intensities"] = list(scan.intensities)
+    Inclui métricas adicionais:
+    - DTW em janela (windowed_dtw)
+    - Variação de lag (lag_variance)
+    - Correlação (pearson_corr)
+    - EDR (Edit Distance on Real sequences)
+    - Fréchet (para dados com pares x,y)
+    """
+    ref = _resample(ref_df, dt)
+    twin = _resample(twin_df, dt)
+    n = min(len(ref), len(twin))
+    ref = ref.iloc[:n]
+    twin = twin.iloc[:n]
 
-            if not first_scan[who]:
-                lidar_params[who] = {
-                    "angle_min": scan.angle_min,
-                    "angle_max": scan.angle_max,
-                    "angle_increment": scan.angle_increment,
-                    "range_min": scan.range_min,
-                    "range_max": scan.range_max,
-                }
-                first_scan[who] = True
+    out = {}
 
-            if all(first_scan.values()) and not params_checked:
-                for key in lidar_params[REFERENCE]:
-                    v1 = lidar_params[REFERENCE][key]
-                    v2 = lidar_params[TEST][key]
-                    if abs(v1 - v2) > 1e-6:
-                        logging.warning(f"Lidar param diff ({key}): {v1} vs {v2}")
-                params_checked = True
-        else:
-            logging.warning(f"Unknown topic: {suffix}")
-            return
-    except Exception as e:
-        logging.error(f"Error parsing {suffix}: {e}")
-        return
+    for col in [c for c in ref.columns if c != "t"]:
+        x = ref[col].to_numpy()
+        y = twin[col].to_numpy()
 
-    compare_data(suffix)
+        _mae = mae(x, y)
+        _rmse = rmse(x, y)
+        _mape = mape(x, y)
+        _dtw = dtw_cost(x, y, window=dtw_window)
+        _lag = lag_xcorr_ms(x, y, fs_hz)
 
-def compare_data(suffix):
-    if suffix not in latest[REFERENCE] or suffix not in latest[TEST]:
-        return
+        # --- Novas métricas ---
+        _, _dtw_win_vals = windowed_dtw(x, y, fs_hz, window_s=1.0)
+        _dtw_var = float(np.nanstd(_dtw_win_vals)) if _dtw_win_vals else 0.0
 
-    ref = latest[REFERENCE][suffix]
-    test = latest[TEST][suffix]
+        _lag_mean, _lag_std = lag_variance(x, y, fs_hz, window_s=1.0)
+        _corr = pearson_corr(x, y)
+        _edr = edr_distance(x, y, epsilon=0.05)
 
-    # Inicializa buffers para esse tópico se ainda não existirem
-    if suffix not in refBuffers:
-        refBuffers[suffix] = deque(maxlen=100)
-        testBuffers[suffix] = deque(maxlen=100)
+        _frechet = None
+        if {"x", "y"}.issubset(ref.columns):
+            path_real = ref[["x", "y"]].to_numpy()
+            path_twin = twin[["x", "y"]].to_numpy()
+            _frechet = discrete_frechet_distance(path_real, path_twin)
 
-    # Adiciona a nova amostra ao buffer deslizante
-    refBuffers[suffix].append(ref)
-    testBuffers[suffix].append(test)
+        out[col] = dict(
+            mae=_mae,
+            rmse=_rmse,
+            mape=_mape,
+            dtw=_dtw,
+            lag_ms=_lag,
+            dtw_var=_dtw_var,
+            lag_mean_ms=_lag_mean,
+            lag_std_ms=_lag_std,
+            pearson_r=_corr,
+            edr=_edr,
+            frechet=_frechet if _frechet is not None else 0.0
+        )
 
-    # Cálculo ponto a ponto
-    mse  = compute_mse(ref, test)
-    rmse = np.sqrt(mse)
-    mae  = compute_mae(ref, test)
-    mape = compute_mape(ref, test)
+    return out
 
-    # Prepara as janelas (listas) para DTW
-    window_ref  = list(refBuffers[suffix])
-    window_test = list(testBuffers[suffix])
 
-    # 1) DTW cru (custo total acumulado)
-    dtw_cru = compute_dtw(window_ref, window_test)
+# --------------------------------------------------------------------------- #
+# Função principal de validação
+# --------------------------------------------------------------------------- #
 
-    # 2) DTW normalizado (média de custo por passo)
-    dtw_medio = compute_dtw_normalized(window_ref, window_test)
+def validate_pair(
+    source_dir: str,
+    twin_dir: str,
+    out_dir: str,
+    dt: float = 0.05,
+    buffer_horizon: float = 3.0,
+    fs_hz: float = 20.0,
+):
+    """
+    Executa validação completa entre source e twin.
+    Espera arquivos CSV com nomes: odom.csv, wheels.csv, imu.csv.
+    Cada arquivo deve conter coluna 't' e variáveis numéricas correspondentes.
 
-    logging.info(
-        f"[{suffix}] "
-        f"MSE={mse:.5f} | RMSE={rmse:.5f} | MAE={mae:.5f} | MAPE={mape:.2f}% "
-        f"| DTW_cru={dtw_cru:.5f} | DTW_medio={dtw_medio:.5f}"
-    )
-    write_csv(suffix, ref, test, mse, rmse, mae, mape, dtw_cru, dtw_medio)
+    Parâmetros
+    ----------
+    source_dir : str
+        Diretório contendo CSVs do AGV fonte.
+    twin_dir : str
+        Diretório contendo CSVs do AGV gêmeo.
+    out_dir : str
+        Diretório onde metrics.json e metrics.csv serão salvos.
+    dt : float
+        Passo temporal (s) para reamostragem.
+    buffer_horizon : float
+        Horizonte de buffer (s), atualmente não usado diretamente.
+    fs_hz : float
+        Frequência de amostragem para cálculo de lag (Hz).
+    """
+    channels = ["odom", "wheels", "imu"]
+    results = {}
 
-def write_csv(suffix, ref, test, mse, rmse, mae, mape, dtw_cru, dtw_medio):
-    ts = datetime.now().isoformat()
-    path = os.path.join(log_dir, suffix.replace("/", "_") + ".csv")
+    for ch in channels:
+        src_path = os.path.join(source_dir, f"{ch}.csv")
+        twin_path = os.path.join(twin_dir, f"{ch}.csv")
+        if not (os.path.exists(src_path) and os.path.exists(twin_path)):
+            print(f"[warn] Arquivos ausentes para canal '{ch}', pulando.")
+            continue
 
-    if suffix not in log_files:
-        first = not os.path.isfile(path)
-        f = open(path, "a", newline="")
+        ref_df = pd.read_csv(src_path)
+        twin_df = pd.read_csv(twin_path)
+
+        # Janela DTW = 20% do tamanho da série
+        dtw_window = int(0.2 * min(len(ref_df), len(twin_df)))
+        metrics_dict = _pair_metrics(ref_df, twin_df, dt, fs_hz, dtw_window)
+        results[ch] = metrics_dict
+
+    # Salvar JSON completo
+    _ensure_dir(os.path.join(out_dir, "metrics.json"))
+    with open(os.path.join(out_dir, "metrics.json"), "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2)
+
+    # Salvar CSV simplificado
+    rows = []
+    for ch, vars_dict in results.items():
+        for var, md in vars_dict.items():
+            rows.append([
+                ch, var,
+                md["mae"], md["rmse"], md["mape"], md["dtw"], md["lag_ms"],
+                md["dtw_var"], md["lag_mean_ms"], md["lag_std_ms"],
+                md["pearson_r"], md["edr"], md["frechet"]
+            ])
+
+    _ensure_dir(os.path.join(out_dir, "metrics.csv"))
+    with open(os.path.join(out_dir, "metrics.csv"), "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        log_files[suffix] = (f, w)
-        if first:
-            # Cabeçalho agora inclui DTW_cru e DTW_medio
-            w.writerow([
-                "timestamp", "mse", "rmse", "mae", "mape",
-                "dtw_cru", "dtw_medio"
-            ] + [f"ref_{i}" for i in range(len(ref))]
-              + [f"test_{i}" for i in range(len(test))])
-    _, writer = log_files[suffix]
-    writer.writerow([ts, mse, rmse, mae, mape, dtw_cru, dtw_medio] + ref + test)
+        w.writerow([
+            "channel", "var", "mae", "rmse", "mape", "dtw", "lag_ms",
+            "dtw_var", "lag_mean_ms", "lag_std_ms", "pearson_r", "edr", "frechet"
+        ])
+        w.writerows(rows)
 
-def close_all():
-    for f, _ in log_files.values():
-        f.close()
+    print(f"[ok] Métricas salvas em {out_dir}/metrics.json e metrics.csv")
+    return results
 
-atexit.register(close_all)
 
-# --- Main ---
+# --------------------------------------------------------------------------- #
+# Execução direta via CLI
+# --------------------------------------------------------------------------- #
+
 if __name__ == "__main__":
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, "validator")
-    client.on_connect = on_connect
-    client.on_message = on_message
-    client.connect(BROKER, PORT)
-    client.loop_forever()
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Offline validation between source and twin runs.")
+    ap.add_argument("--source", required=True, help="Diretório com CSVs do AGV fonte")
+    ap.add_argument("--twin", required=True, help="Diretório com CSVs do AGV gêmeo")
+    ap.add_argument("--out", required=True, help="Diretório de saída (resultados)")
+    ap.add_argument("--dt", type=float, default=0.05, help="Passo temporal para reamostragem (s)")
+    ap.add_argument("--fs", type=float, default=20.0, help="Frequência de amostragem (Hz)")
+    args = ap.parse_args()
+
+    results = validate_pair(args.source, args.twin, args.out, dt=args.dt, fs_hz=args.fs)
+
+    print(json.dumps(results, indent=2))
