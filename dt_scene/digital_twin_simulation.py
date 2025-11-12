@@ -67,10 +67,12 @@ def _update_pending_targets():
 # ----------------------------------------------------------------------------- #
 WHEEL_RADIUS = 0.05
 WHEEL_BASE   = 0.30
+# WHEEL_RADIUS = 0.045   # ~10% menor
+# WHEEL_BASE   = 0.25    # ~17% menor
 MQTT_QOS     = 1
 
-COMM_DELAY_MEAN = 2.0   # atraso médio (s) -> mude para 0, 0.5, 1.0, 2.0
-COMM_DELAY_STD  = 0.2   # jitter (s)
+COMM_DELAY_MEAN = 2.0  # atraso médio (s) -> mude para 0, 0.5, 1.0, 2.0
+COMM_DELAY_STD  = 0.6   # jitter (s)
 
 self._pending_targets = []  # fila de (t_exec, TargetPosition)
 self.target_position  = None
@@ -196,6 +198,62 @@ def sysCall_actuation():
 
     sim.setJointTargetVelocity(self.motorLeft,  left_velocity)
     sim.setJointTargetVelocity(self.motorRight, right_velocity)
+# def sysCall_actuation():
+#     sim = require('sim')
+#     self.client.loop(0.01)
+
+#     _update_pending_targets()
+#     if self.target_position is None:
+#         return
+
+#     # 🔹 (1) atraso interno de controle (~100 ms)
+#     now = time.time()
+#     last = getattr(self, "last_cmd_time", 0.0)
+#     if now - last < 0.10:      # 100 ms entre atualizações de comando
+#         return
+#     self.last_cmd_time = now
+
+#     # Posição atual
+#     position    = sim.getObjectPosition(self.pioneer, -1)
+#     orientation = sim.getObjectOrientation(self.pioneer, -1)
+#     x, y   = position[0], position[1]
+#     theta  = orientation[2]
+
+#     dx = self.target_position.x - x
+#     dy = self.target_position.y - y
+#     distance = math.hypot(dx, dy)
+
+#     if distance < 0.05:   # 🔹 aceita erro maior de posição
+#         left_velocity  = 0.0
+#         right_velocity = 0.0
+#     else:
+#         target_theta = math.atan2(dy, dx)
+#         diff_theta   = normalize_angle(target_theta - theta)
+
+#         # 🔹 (2) ganhos mais suaves (resposta mais lenta e menos precisa)
+#         linear_speed  = 0.25 if abs(diff_theta) < 0.5 else 0.0
+#         angular_speed = max(-0.8, min(0.8, diff_theta))
+
+#         left_velocity  = (linear_speed - angular_speed * WHEEL_BASE / 2) / WHEEL_RADIUS
+#         right_velocity = (linear_speed + angular_speed * WHEEL_BASE / 2) / WHEEL_RADIUS
+
+#         # 🔹 (3) atuadores imperfeitos: ruído + drift lento
+#         self.left_gain  = getattr(self, "left_gain", 1.0)
+#         self.right_gain = getattr(self, "right_gain", 1.0)
+
+#         # drift bem pequeno que acumula ao longo da simulação
+#         self.left_gain  += random.gauss(0.0, 0.0005)
+#         self.right_gain += random.gauss(0.0, 0.0005)
+
+#         noise_l = random.gauss(1.0, 0.03)  # 3 % de ruído instantâneo
+#         noise_r = random.gauss(1.0, 0.03)
+
+#         left_velocity  *= self.left_gain * noise_l
+#         right_velocity *= self.right_gain * noise_r
+
+#     sim.setJointTargetVelocity(self.motorLeft,  left_velocity)
+#     sim.setJointTargetVelocity(self.motorRight, right_velocity)
+
 
 # ----------------------------------------------------------------------------- #
 # Sensoriamento e logs

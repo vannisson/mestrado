@@ -11,3 +11,6 @@ protobuf==6.30.2
 
 # Control
 keyboard==0.13.5
+
+matplotlib
+pandas
