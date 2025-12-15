@@ -67,12 +67,17 @@ def _update_pending_targets():
 # ----------------------------------------------------------------------------- #
 WHEEL_RADIUS = 0.05
 WHEEL_BASE   = 0.30
-# WHEEL_RADIUS = 0.045   # ~10% menor
-# WHEEL_BASE   = 0.25    # ~17% menor
+# WHEEL_RADIUS = 0.045   # ~10% menor -> pertubação do modelo
+# WHEEL_BASE   = 0.25    # ~17% menor  -> pertubação do modelo
 MQTT_QOS     = 1
 
+# Com delay
 COMM_DELAY_MEAN = 2.0  # atraso médio (s) -> mude para 0, 0.5, 1.0, 2.0
 COMM_DELAY_STD  = 0.6   # jitter (s)
+
+# Sem delay
+# COMM_DELAY_MEAN = 0  # atraso médio (s) -> mude para 0, 0.5, 1.0, 2.0
+# COMM_DELAY_STD  = 0   # jitter (s)
 
 self._pending_targets = []  # fila de (t_exec, TargetPosition)
 self.target_position  = None

@@ -1,412 +1,333 @@
-# plot_compare_metrics.py
-# ============================================================
-# Paper-ready figures from three metrics.csv files:
-# final_results/{normal,delay,wrong_model}/metrics.csv
-# - 3x1 histograms per metric (one subplot per scenario)
-# - overlay histograms (appendix/checks)
-# - compact summary table (CSV + LaTeX booktabs)
-# - scatter plots: RMSE vs Lag(avg), DTW_norm vs Lag(avg)
-# - compact box/violin plots com limites padronizados e N
-# Author: Geo / Mestrado (UFAL)
-# ============================================================
+#!/usr/bin/env python3
+"""
+Figuras principais (versão Seaborn) para a dissertação.
+
+Gera, a partir de final_results/{normal,delay,wrong_model}/metrics.csv:
+
+- Histogramas 3×1:
+    • RMSE
+    • DTW_norm
+    • Lag médio (lag_avg_ms)
+    • Fréchet (XY)  [opcional: pode comentar se não quiser]
+
+- Boxplots por cenário:
+    • RMSE
+    • DTW_norm
+    • Fréchet (XY)
+
+- Scatter plots:
+    • RMSE        vs Lag médio
+    • DTW_norm    vs Lag médio
+    • RMSE        vs DTW_norm  (diagnóstico delay × modelo)
+    • Fréchet XY  vs Lag médio (opcional)
+
+Saída: fig_seaborn/
+"""
 
 from pathlib import Path
-import argparse
 import numpy as np
 import pandas as pd
+import seaborn as sns
 import matplotlib.pyplot as plt
 
-plt.ioff()  # no GUI
+sns.set_theme(style="whitegrid", context="paper", font_scale=1.2)
 
-# ------------------------------- Utils --------------------------------
-def _read_metrics(csv_path: Path) -> pd.DataFrame:
-    df = pd.read_csv(csv_path)
+# ---------------------------------------------------------------------
+# Utilitários
+# ---------------------------------------------------------------------
+TITLE_MAP = {
+    "mse": "MSE",
+    "rmse": "RMSE",
+    "mae": "MAE",
+    "mape": "MAPE",
+    "dtw_cru": "DTW (raw)",
+    "dtw_norm": "DTW normalizado",
+    "frechet_xy": "Distância de Fréchet (XY)",
+    "edr_x": "EDR (X)",
+    "edr_y": "EDR (Y)",
+    "lag_avg_ms": "Lag médio [ms]",
+    "lag_x_ms": "Lag X [ms]",
+    "lag_y_ms": "Lag Y [ms]",
+}
+
+def mt(metric: str) -> str:
+    return TITLE_MAP.get(metric, metric)
+
+def ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
+
+def read_metrics(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    # tenta converter colunas numéricas
     for c in df.columns:
         df[c] = pd.to_numeric(df[c], errors="ignore")
     return df
 
-def _num(series):
-    return pd.to_numeric(series, errors="coerce").dropna()
+# ---------------------------------------------------------------------
+# Lag médio
+# ---------------------------------------------------------------------
+def add_lag_avg(df: pd.DataFrame) -> pd.DataFrame:
+    """Adiciona coluna 'lag_avg_ms' se possível (x, y ou já existente)."""
+    if "lag_avg_ms" in df.columns:
+        return df
 
-def _ensure_out(out_dir: Path) -> Path:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    return out_dir
+    lx = df["lag_x_ms"] if "lag_x_ms" in df.columns else None
+    ly = df["lag_y_ms"] if "lag_y_ms" in df.columns else None
 
-def _title_metric(metric: str) -> str:
-    mapping = {
-        "mse": "MSE",
-        "rmse": "RMSE",
-        "mae": "MAE",
-        "mape": "MAPE",
-        "dtw_cru": "DTW (raw)",
-        "dtw_norm": "DTW (normalized)",
-        "frechet_xy": "Fréchet distance (XY)",
-        "edr_x": "EDR (X)",
-        "edr_y": "EDR (Y)",
-        "pearson_x": "Pearson r (X)",
-        "pearson_y": "Pearson r (Y)",
-        "lag_x_ms": "Lag (X) [ms]",
-        "lag_y_ms": "Lag (Y) [ms]",
-        "lag_avg_ms": "Lag (avg X/Y) [ms]",
-    }
-    return mapping.get(metric, metric)
+    if lx is not None and ly is not None:
+        lx = pd.to_numeric(lx, errors="coerce")
+        ly = pd.to_numeric(ly, errors="coerce")
+        df["lag_avg_ms"] = pd.concat([lx, ly], axis=1).mean(axis=1)
+    elif lx is not None:
+        df["lag_avg_ms"] = pd.to_numeric(lx, errors="coerce")
+    elif ly is not None:
+        df["lag_avg_ms"] = pd.to_numeric(ly, errors="coerce")
 
-def _annotate_stats(ax, data: np.ndarray, fontsize=9):
-    if data.size == 0:
+    return df
+
+def metric_available(metric: str, scen_data: dict) -> bool:
+    if metric == "lag_avg_ms":
+        return any(
+            ("lag_avg_ms" in df.columns)
+            or ("lag_x_ms" in df.columns)
+            or ("lag_y_ms" in df.columns)
+            for df in scen_data.values()
+        )
+    return any(metric in df.columns for df in scen_data.values())
+
+def get_global_limits(metric: str, scen_data: dict) -> tuple[float, float]:
+    """Limites globais (min/max) para um dado metric, com margem."""
+    values = []
+
+    for df in scen_data.values():
+        local = df.copy()
+        if metric == "lag_avg_ms":
+            local = add_lag_avg(local)
+        if metric in local.columns:
+            vals = pd.to_numeric(local[metric], errors="coerce").dropna()
+            values.append(vals)
+
+    if not values:
+        return (0.0, 1.0)
+
+    all_vals = pd.concat(values)
+    vmin, vmax = all_vals.min(), all_vals.max()
+    if vmin == vmax:
+        return (float(vmin - 1), float(vmax + 1))
+
+    margin = 0.05 * (vmax - vmin)
+    return (float(vmin - margin), float(vmax + margin))
+
+# ---------------------------------------------------------------------
+# Gráficos
+# ---------------------------------------------------------------------
+def plot_hist_3x1(metric: str, scen_data: dict, scen_titles: dict, outdir: Path) -> None:
+    if not metric_available(metric, scen_data):
         return
-    mu = np.nanmean(data)
-    med = np.nanmedian(data)
-    n = data.size
-    ax.legend([f"N={n}, mean={mu:.3g}, median={med:.3g}"],
-              loc="upper right", frameon=True, fontsize=fontsize)
 
-def _common_numeric_columns(dfs: dict) -> list:
-    sets = []
-    for df in dfs.values():
-        cols = df.select_dtypes(include=[np.number]).columns.tolist()
-        cols = [c for c in cols if c.lower() not in ("epoch", "timestamp")]
-        sets.append(set(cols))
-    common = sorted(set.intersection(*sets)) if sets else []
-    return common
+    vmin, vmax = get_global_limits(metric, scen_data)
 
-# ------------------------ Summary Table (CSV + LaTeX) ------------------
-def _summary_stats(s: pd.Series):
-    s = pd.to_numeric(s, errors="coerce").dropna().values
-    if s.size == 0:
-        return np.nan, np.nan, np.nan, np.nan, np.nan
-    mean = np.mean(s)
-    std = np.std(s, ddof=1)
-    med = np.median(s)
-    q1, q3 = np.percentile(s, [25, 75])
-    return mean, std, med, q1, q3
+    fig, axs = plt.subplots(1, 3, figsize=(14, 4), sharey=True)
+    fig.suptitle(f"{mt(metric)} — distribuição por cenário", y=1.05)
 
-def export_summary_tables(scen_data: dict, out_dir: Path, metrics: list):
-    rows = []
-    for scen, df in scen_data.items():
-        for m in metrics:
-            if m not in df.columns:
-                continue
-            mean, std, med, q1, q3 = _summary_stats(df[m])
-            rows.append({
-                "scenario": scen,
-                "metric": m,
-                "mean": mean, "std": std,
-                "median": med, "q1": q1, "q3": q3,
-                "N": pd.to_numeric(df[m], errors="coerce").dropna().size
-            })
-    tab = pd.DataFrame(rows)
-    csv_path = out_dir / "metrics_summary_by_scenario.csv"
-    tab.to_csv(csv_path, index=False)
+    for ax, scen in zip(axs, ["normal", "delay", "wrong_model"]):
+        df = scen_data[scen].copy()
+        if metric == "lag_avg_ms":
+            df = add_lag_avg(df)
 
-    # LaTeX compact table (booktabs): mean±std / median[IQR]
-    pivot = tab.pivot(index="scenario", columns="metric",
-                      values=["mean", "std", "median", "q1", "q3", "N"])
-
-    def fmt_cell(r, c):
-        try:
-            mean = pivot.loc[r, ("mean", c)]
-        except KeyError:
-            return "--"
-        std  = pivot.loc[r, ("std", c)]
-        med  = pivot.loc[r, ("median", c)]
-        q1   = pivot.loc[r, ("q1", c)]
-        q3   = pivot.loc[r, ("q3", c)]
-        if pd.isna(mean):
-            return "--"
-        return f"{mean:.3g}±{std:.3g} / {med:.3g}[{q1:.3g}–{q3:.3g}]"
-
-    scen_order = ["normal", "delay", "wrong_model"]
-    cols = [c for c in metrics if (("mean", c) in pivot.columns)]
-    lines = []
-    lines.append("\\begin{tabular}{l" + "c"*len(cols) + "}")
-    lines.append("\\toprule")
-    lines.append("Scenario & " + " & ".join(_title_metric(c) for c in cols) + " \\\\")
-    lines.append("\\midrule")
-    label_map = {"normal": "Scenario 1", "delay": "Scenario 2", "wrong_model": "Scenario 3"}
-    for scen in scen_order:
-        if scen not in pivot.index:
-            continue
-        cells = [fmt_cell(scen, c) for c in cols]
-        lines.append(label_map[scen] + " & " + " & ".join(cells) + " \\\\")
-    lines.append("\\bottomrule")
-    lines.append("\\end{tabular}")
-    (out_dir / "metrics_summary_by_scenario.tex").write_text("\n".join(lines), encoding="utf-8")
-
-    print(f"[table] CSV -> {csv_path}")
-    print(f"[table] LaTeX -> {out_dir/'metrics_summary_by_scenario.tex'}")
-
-# ------------------------- Plot: histograms ----------------------------
-def plot_hist_3x1(metric: str, scen_data: dict, scen_titles: dict,
-                  out_dir: Path, bins=30, clip_p=None, dpi=300, tight=True):
-    fig, axes = plt.subplots(1, 3, figsize=(12, 3.6), sharex=False, sharey=False)
-    fig.suptitle(f"{_title_metric(metric)} — Distribution across scenarios", fontsize=12)
-
-    for ax, key in zip(axes, ["normal", "delay", "wrong_model"]):
-        if key not in scen_data or metric not in scen_data[key].columns:
+        if metric not in df.columns:
             ax.set_visible(False)
             continue
-        series = _num(scen_data[key][metric])
-        if clip_p:
-            hi = np.nanpercentile(series, clip_p)
-            series = series[series <= hi]
-        ax.hist(series.values, bins=bins, edgecolor="black", alpha=0.75)
-        ax.set_title(scen_titles[key])
-        ax.set_xlabel(_title_metric(metric))
-        ax.set_ylabel("Frequency")
-        ax.grid(True, ls="--", alpha=0.25)
-        _annotate_stats(ax, series.values)
 
-    _ensure_out(out_dir)
-    fname = f"hist_{metric}_3x1.png" if not clip_p else f"hist_{metric}_3x1_clipped_p{int(clip_p)}.png"
-    if tight:
-        fig.tight_layout(rect=[0, 0.0, 1, 0.95])
-        fig.savefig(out_dir / fname, dpi=dpi, bbox_inches="tight")
-    else:
-        fig.savefig(out_dir / fname, dpi=dpi)
+        data = pd.to_numeric(df[metric], errors="coerce").dropna()
+        sns.histplot(
+            data,
+            ax=ax,
+            bins=30,
+            color="#4C72B0",
+            edgecolor="black",
+        )
+        ax.set_title(scen_titles[scen])
+        ax.set_xlabel(mt(metric))
+        ax.set_ylabel("Frequência")
+        ax.set_xlim(vmin, vmax)
+
+    fig.tight_layout()
+    fig.savefig(outdir / f"hist3x1_{metric}.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print(f"[plot] saved: {out_dir / fname}")
 
-def plot_hist_overlay(metric: str, scen_data: dict, scen_titles: dict,
-                      out_dir: Path, bins=30, clip_p=None, dpi=300, tight=True):
-    fig, ax = plt.subplots(figsize=(6.2, 4.2))
-    for key in ["normal", "delay", "wrong_model"]:
-        if key not in scen_data or metric not in scen_data[key].columns:
-            continue
-        series = _num(scen_data[key][metric])
-        if clip_p:
-            hi = np.nanpercentile(series, clip_p)
-            series = series[series <= hi]
-        ax.hist(series.values, bins=bins, alpha=0.45, edgecolor="black",
-                density=True, label=scen_titles[key])
-    ax.set_title(f"{_title_metric(metric)} — Overlaid distributions")
-    ax.set_xlabel(_title_metric(metric))
-    ax.set_ylabel("Density")
-    ax.grid(True, ls="--", alpha=0.25)
-    ax.legend(frameon=True)
-    _ensure_out(out_dir)
-    fname = f"hist_{metric}_overlay.png" if not clip_p else f"hist_{metric}_overlay_clipped_p{int(clip_p)}.png"
-    if tight:
-        fig.tight_layout()
-        fig.savefig(out_dir / fname, dpi=dpi, bbox_inches="tight")
-    else:
-        fig.savefig(out_dir / fname, dpi=dpi)
-    plt.close(fig)
-    print(f"[plot] saved: {out_dir / fname}")
+def plot_box(metric: str, scen_data: dict, scen_titles: dict, outdir: Path) -> None:
+    if not metric_available(metric, scen_data):
+        return
 
-# ------------------------- Plot: scatters & boxes ----------------------
-def _avg_lag(df: pd.DataFrame):
-    lx = pd.to_numeric(df.get("lag_x_ms"), errors="coerce")
-    ly = pd.to_numeric(df.get("lag_y_ms"), errors="coerce")
-    if lx is None and ly is None:
-        return None
-    if lx is not None and ly is not None:
-        return pd.concat([lx, ly], axis=1).mean(axis=1)
-    return lx if lx is not None else ly
-
-def scatter_across_scenarios(scen_data: dict, x_metric: str, y_metric: str,
-                             out_dir: Path, title: str, fname: str,
-                             x_clip_p=None, dpi=300, tight=True):
-    fig, ax = plt.subplots(figsize=(6.4, 4.4))
-    colors = {"normal": "#1f77b4", "delay": "#ff7f0e", "wrong_model": "#2ca02c"}
-    labels = {"normal": "Scenario 1 — Nominal Twin",
-              "delay": "Scenario 2 — Command Delay",
-              "wrong_model": "Scenario 3 — Perturbed Model"}
-    plotted = False
+    frames = []
     for scen, df in scen_data.items():
-        if y_metric not in df.columns and y_metric != "lag_avg_ms":
-            continue
-        x = _avg_lag(df) if x_metric == "lag_avg_ms" else pd.to_numeric(df.get(x_metric), errors="coerce")
-        y = _avg_lag(df) if y_metric == "lag_avg_ms" else pd.to_numeric(df.get(y_metric), errors="coerce")
-        if x is None or y is None:
-            continue
-        x, y = x.dropna().astype(float), y.dropna().astype(float)
-        n = min(len(x), len(y))
-        if n == 0:
-            continue
-        if x_clip_p:
-            lo, hi = np.percentile(x.iloc[:n], [100-x_clip_p, x_clip_p])
-            mask = (x.iloc[:n] >= lo) & (x.iloc[:n] <= hi)
-            xx, yy = x.iloc[:n][mask], y.iloc[:n][mask]
-        else:
-            xx, yy = x.iloc[:n], y.iloc[:n]
-        ax.scatter(xx, yy, s=18, alpha=0.45, label=labels.get(scen, scen),
-                   c=colors.get(scen, None))
-        plotted = True
-    if not plotted:
-        plt.close(fig)
+        local = df.copy()
+        if metric == "lag_avg_ms":
+            local = add_lag_avg(local)
+        if metric in local.columns:
+            vals = pd.to_numeric(local[metric], errors="coerce").dropna()
+            if not vals.empty:
+                frames.append(
+                    pd.DataFrame(
+                        {
+                            "value": vals,
+                            "scenario": scen_titles[scen],
+                        }
+                    )
+                )
+
+    if not frames:
         return
-    ax.set_title(title)
-    ax.set_xlabel(_title_metric(x_metric))
-    ax.set_ylabel(_title_metric(y_metric))
-    ax.axvline(0.0, color="k", lw=1, ls="--", alpha=0.5)  # referência de lag=0
-    ax.grid(True, ls="--", alpha=0.25)
-    ax.legend(frameon=True)
-    if tight:
-        fig.tight_layout()
-        fig.savefig(out_dir / fname, dpi=dpi, bbox_inches="tight")
-    else:
-        fig.savefig(out_dir / fname, dpi=dpi)
-    plt.close(fig)
-    print(f"[plot] saved: {out_dir / fname}")
 
-# y-lims padrão para box/violin (podem ser ajustados por CLI)
-DEFAULT_YLIMS = {
-    "dtw_norm": (0.0, 0.18),
-    "frechet_xy": (0.0, 0.30),
-    "rmse": (0.0, 0.75),
-}
+    dfc = pd.concat(frames, ignore_index=True)
+    vmin, vmax = dfc["value"].min(), dfc["value"].max()
+    if vmin == vmax:
+        vmin -= 1
+        vmax += 1
 
-def box_per_metric(metric: str, scen_data: dict, out_dir: Path, violin=False,
-                   dpi=300, tight=True, set_common_ylim=True):
-    labels = []
-    data = []
-    order = [("normal", "Scenario 1 — Nominal Twin"),
-             ("delay", "Scenario 2 — Command Delay"),
-             ("wrong_model", "Scenario 3 — Perturbed Model")]
-    for key, lab in order:
-        if key not in scen_data or metric not in scen_data[key].columns:
-            continue
-        s = pd.to_numeric(scen_data[key][metric], errors="coerce").dropna().values
-        if s.size:
-            labels.append(lab)
-            data.append(s)
-    if not data:
+    plt.figure(figsize=(7, 4))
+    ax = sns.boxplot(
+        data=dfc,
+        x="scenario",
+        y="value",
+        showmeans=True,
+        width=0.55,
+        meanprops={
+            "marker": "D",
+            "markerfacecolor": "green",
+            "markeredgecolor": "black",
+        },
+    )
+    sns.stripplot(
+        data=dfc,
+        x="scenario",
+        y="value",
+        color="black",
+        size=1.5,
+        alpha=0.3,
+    )
+
+    ax.set_title(f"{mt(metric)} — distribuição compacta")
+    ax.set_xlabel("")
+    ax.set_ylabel(mt(metric))
+    ax.set_ylim(vmin - 0.05 * (vmax - vmin), vmax + 0.05 * (vmax - vmin))
+
+    plt.tight_layout()
+    plt.savefig(outdir / f"box_{metric}.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+def plot_scatter(x_metric: str, y_metric: str, scen_data: dict, scen_titles: dict, outdir: Path) -> None:
+    if not (metric_available(x_metric, scen_data) and metric_available(y_metric, scen_data)):
         return
-    fig, ax = plt.subplots(figsize=(6.4, 4.2))
-    if violin:
-        parts = ax.violinplot(data, showmeans=True, showextrema=True, showmedians=True)
-        ax.set_xticks(range(1, len(labels) + 1))
-        ax.set_xticklabels(labels)
-    else:
-        ax.boxplot(data, labels=labels, showmeans=True)
 
-    # y-lim comum (ajuda comparação entre cenários)
-    if set_common_ylim and metric in DEFAULT_YLIMS:
-        ax.set_ylim(*DEFAULT_YLIMS[metric])
+    frames = []
 
-    # anota N acima de cada caixa
-    ymax = ax.get_ylim()[1]
-    for i, arr in enumerate(data, start=1):
-        ax.text(i, ymax * 1.01, f"N={len(arr)}", ha="center", va="bottom", fontsize=9)
+    for scen, df in scen_data.items():
+        local = df.copy()
+        if x_metric == "lag_avg_ms":
+            local = add_lag_avg(local)
+        if y_metric == "lag_avg_ms":
+            local = add_lag_avg(local)
 
-    ax.set_title(f"{_title_metric(metric)} — compact distribution")
-    ax.set_ylabel(_title_metric(metric))
-    ax.grid(True, ls="--", alpha=0.25)
-    if tight:
-        fig.tight_layout()
-        fig.savefig(out_dir / (f"violin_{metric}.png" if violin else f"box_{metric}.png"),
-                    dpi=dpi, bbox_inches="tight")
-    else:
-        fig.savefig(out_dir / (f"violin_{metric}.png" if violin else f"box_{metric}.png"),
-                    dpi=dpi)
-    plt.close(fig)
-    print(f"[plot] saved: {out_dir / (f'violin_{metric}.png' if violin else f'box_{metric}.png')}")
+        if (x_metric not in local.columns) or (y_metric not in local.columns):
+            continue
 
-# ------------------------------- Main ---------------------------------
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--root", default="final_results",
-                    help="Root folder containing scenario subfolders")
-    ap.add_argument("--normal", default="normal/metrics.csv",
-                    help="Path relative to --root for Scenario 1 (normal)")
-    ap.add_argument("--delay", default="delay/metrics.csv",
-                    help="Path relative to --root for Scenario 2 (delay)")
-    ap.add_argument("--wrong_model", default="wrong_model/metrics.csv",
-                    help="Path relative to --root for Scenario 3 (perturbed model)")
-    ap.add_argument("--out_dir", default=None,
-                    help="Output folder (default: <root>/figs_compare_v2)")
-    ap.add_argument("--bins", type=int, default=30)
-    ap.add_argument("--clip_mape_p", type=float, default=99.0,
-                    help="Percentile clipping for MAPE (to curb outliers)")
-    ap.add_argument("--x_clip_p", type=float, default=None,
-                    help="Percentile for x-axis clipping on scatter (e.g., 99 for p1–p99)")
-    ap.add_argument("--no_scatter", action="store_true",
-                    help="Skip scatter plots")
-    ap.add_argument("--no_boxes", action="store_true",
-                    help="Skip box/violin plots")
-    ap.add_argument("--violin", action="store_true",
-                    help="Use violin instead of box for compact plots")
-    ap.add_argument("--dpi", type=int, default=300, help="Figure DPI")
-    ap.add_argument("--no_tight", action="store_true", help="Disable bbox_inches='tight'")
-    args = ap.parse_args()
+        x = pd.to_numeric(local[x_metric], errors="coerce")
+        y = pd.to_numeric(local[y_metric], errors="coerce")
 
-    root = Path(args.root)
-    scen_paths = {
-        "normal": root / args.normal,
-        "delay": root / args.delay,
-        "wrong_model": root / args.wrong_model,
+        frame = pd.DataFrame(
+            {
+                x_metric: x,
+                y_metric: y,
+                "scenario": scen_titles[scen],
+            }
+        ).dropna()
+
+        if not frame.empty:
+            frames.append(frame)
+
+    if not frames:
+        return
+
+    full = pd.concat(frames, ignore_index=True)
+
+    plt.figure(figsize=(7, 4))
+    sns.scatterplot(
+        data=full,
+        x=x_metric,
+        y=y_metric,
+        hue="scenario",
+        alpha=0.6,
+        s=35,
+    )
+
+    plt.title(f"{mt(y_metric)} vs {mt(x_metric)}")
+    plt.xlabel(mt(x_metric))
+    plt.ylabel(mt(y_metric))
+    plt.tight_layout()
+    plt.savefig(outdir / f"scatter_{y_metric}_vs_{x_metric}.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+# ---------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------
+def main() -> None:
+    root = Path("final_results")
+    outdir = Path("fig_seaborn")
+    ensure_dir(outdir)
+
+    scen_data = {
+        "normal": read_metrics(root / "normal/metrics.csv"),
+        "delay": read_metrics(root / "delay/metrics.csv"),
+        "wrong_model": read_metrics(root / "wrong_model/metrics.csv"),
     }
 
     scen_titles = {
-        "normal": "Scenario 1 — Nominal Twin",
-        "delay": "Scenario 2 — Command Delay",
-        "wrong_model": "Scenario 3 — Perturbed Model",
+        "normal": "Nominal",
+        "delay": "Delay",
+        "wrong_model": "Modelo perturbado",
     }
 
-    # read data
-    scen_data = {}
-    for k, p in scen_paths.items():
-        if p.is_file():
-            df = _read_metrics(p)
-            # Deriva lag médio se não existir
-            if "lag_avg_ms" not in df.columns and (("lag_x_ms" in df.columns) or ("lag_y_ms" in df.columns)):
-                df["lag_avg_ms"] = _avg_lag(df)
-            scen_data[k] = df
-        else:
-            print(f"[warn] missing metrics.csv for {k}: {p}")
+    # -----------------------------------------------------------------
+    # Histogramas 3×1 (apenas métricas principais)
+    # -----------------------------------------------------------------
+    CORE_HIST_METRICS = [
+        "rmse",
+        "dtw_norm",
+        "lag_avg_ms",
+        "frechet_xy",  # opcional: comente se não quiser
+    ]
 
-    if not scen_data:
-        raise SystemExit("[error] No metrics found.")
+    for m in CORE_HIST_METRICS:
+        plot_hist_3x1(m, scen_data, scen_titles, outdir)
 
-    # output folder
-    out_dir = Path(args.out_dir) if args.out_dir else (root / "figs_compare_v2")
-    _ensure_out(out_dir)
+    # -----------------------------------------------------------------
+    # Boxplots compactos (cenários lado a lado)
+    # -----------------------------------------------------------------
+    CORE_BOX_METRICS = [
+        "rmse",
+        "dtw_norm",
+        "frechet_xy",
+    ]
 
-    # common numeric metrics across scenarios
-    common = _common_numeric_columns(scen_data)
-    if not common:
-        raise SystemExit("[error] No common numeric metrics across scenarios.")
+    for m in CORE_BOX_METRICS:
+        plot_box(m, scen_data, scen_titles, outdir)
 
-    # --- Summary tables (CSV + LaTeX)
-    export_summary_tables(scen_data, out_dir, common)
+    # -----------------------------------------------------------------
+    # Scatter plots principais
+    # -----------------------------------------------------------------
+    SCATTER_PAIRS = [
+        ("lag_avg_ms", "rmse"),
+        ("lag_avg_ms", "dtw_norm"),
+        ("rmse", "dtw_norm"),
+        ("lag_avg_ms", "frechet_xy"),  # opcional
+    ]
 
-    # --- Figures: histograms
-    for metric in common:
-        if metric.lower() == "mape" and args.clip_mape_p:
-            plot_hist_3x1(metric, scen_data, scen_titles, out_dir,
-                          bins=args.bins, clip_p=args.clip_mape_p, dpi=args.dpi, tight=not args.no_tight)
-            plot_hist_overlay(metric, scen_data, scen_titles, out_dir,
-                              bins=args.bins, clip_p=args.clip_mape_p, dpi=args.dpi, tight=not args.no_tight)
-        else:
-            plot_hist_3x1(metric, scen_data, scen_titles, out_dir, bins=args.bins, dpi=args.dpi, tight=not args.no_tight)
-            plot_hist_overlay(metric, scen_data, scen_titles, out_dir, bins=args.bins, dpi=args.dpi, tight=not args.no_tight)
+    for x_metric, y_metric in SCATTER_PAIRS:
+        plot_scatter(x_metric, y_metric, scen_data, scen_titles, outdir)
 
-    # --- Figures: scatters (key relationships)
-    if not args.no_scatter:
-        if ("rmse" in common) and (("lag_x_ms" in common) or ("lag_y_ms" in common) or ("lag_avg_ms" in common)):
-            scatter_across_scenarios(
-                scen_data, "lag_avg_ms", "rmse", out_dir,
-                "Relationship between magnitude error and misalignment",
-                "scatter_rmse_vs_lagavg.png",
-                x_clip_p=args.x_clip_p, dpi=args.dpi, tight=not args.no_tight
-            )
-        if ("dtw_norm" in common) and (("lag_x_ms" in common) or ("lag_y_ms" in common) or ("lag_avg_ms" in common)):
-            scatter_across_scenarios(
-                scen_data, "lag_avg_ms", "dtw_norm", out_dir,
-                "Temporal-shape similarity vs misalignment",
-                "scatter_dtw_norm_vs_lagavg.png",
-                x_clip_p=args.x_clip_p, dpi=args.dpi, tight=not args.no_tight
-            )
-
-    # --- Figures: box/violin para métricas core
-    if not args.no_boxes:
-        for metric in ["rmse", "dtw_norm", "frechet_xy"]:
-            if metric in common:
-                box_per_metric(metric, scen_data, out_dir,
-                               violin=args.violin, dpi=args.dpi, tight=not args.no_tight,
-                               set_common_ylim=True)
-
-    print("[done] all outputs in:", out_dir)
+    print(f"✔ Figuras principais geradas em: {outdir.absolute()}")
 
 if __name__ == "__main__":
     main()
