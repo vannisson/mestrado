@@ -1,0 +1,2 @@
+epoch,mse,rmse,mae,mape,dtw_cru,dtw_norm,frechet_xy,edr_x,edr_y,pearson_x,pearson_y,lag_x_ms,lag_y_ms
+1,0.0,0.0,0.0,0.0,0.028886775837255456,0.0001805423489828466,0.0009597845553750132,57.0,57.0,0.0,0.0,-600.0,-2850.0
