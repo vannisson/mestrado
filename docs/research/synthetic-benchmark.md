@@ -22,7 +22,9 @@ uv run dtv suite experiments/pioneer/synthetic
 
 O comando usa o campo `expected_status` de cada YAML. Assim, uma falha esperada continua
 sendo um sucesso da bancada, desde que o resultado observado bata com o diagnóstico
-planejado.
+planejado. Além da tabela no terminal, a execução gera `suite.json` e `suite.csv` em
+`artifacts/suites/<nome-da-suite>/<run-id>/`, o que facilita anexar a matriz como
+evidência rastreável.
 
 Na calibração inicial sobre os logs legados do Pioneer, os controles produziram os
 seguintes valores aproximados:

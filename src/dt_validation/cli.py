@@ -10,9 +10,9 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from dt_validation.core.config import load_experiment
 from dt_validation.core.models import CheckStatus
 from dt_validation.core.replay import run_replay
+from dt_validation.core.suite import run_suite
 from dt_validation.metrics.registry import METRIC_REGISTRY
 
 app = typer.Typer(
@@ -51,27 +51,24 @@ def replay(config: Annotated[Path, typer.Argument(exists=True, dir_okay=False)])
 @app.command()
 def suite(path: Annotated[Path, typer.Argument(exists=True)]) -> None:
     """Executa uma matriz de configurações e compara com expected_status quando houver."""
-    configs = sorted(path.glob("*.yaml")) if path.is_dir() else [path]
-    if not configs:
-        console.print(f"Nenhuma configuração YAML encontrada em {path}")
-        raise typer.Exit(code=1)
-
+    try:
+        outcome = run_suite(path)
+    except ValueError as error:
+        console.print(str(error))
+        raise typer.Exit(code=1) from error
     table = Table("Experimento", "Obtido", "Esperado", "Artefatos")
-    unexpected = 0
-    for config_path in configs:
-        expected = load_experiment(config_path).expected_status
-        outcome = run_replay(config_path)
+    for result in outcome.results:
+        expected = result.expected
         expected_label = expected.value if expected is not None else "-"
-        if expected is not None and outcome.status != expected:
-            unexpected += 1
         table.add_row(
-            config_path.stem,
-            f"[{_status_color(outcome.status)}]{outcome.status}[/]",
+            result.config.stem,
+            f"[{_status_color(result.observed)}]{result.observed}[/]",
             expected_label,
-            str(outcome.run_dir),
+            str(result.run_dir),
         )
     console.print(table)
-    if unexpected:
+    console.print(f"Resumo da suíte: {outcome.summary_json}")
+    if outcome.status == CheckStatus.FAIL:
         raise typer.Exit(code=1)
 
 
