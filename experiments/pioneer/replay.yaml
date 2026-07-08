@@ -1,0 +1,136 @@
+name: pioneer-forced-delay-replay
+
+context_of_use:
+  purpose: Avaliar se o framework detecta a degradação introduzida por atraso no candidato.
+  question: O candidato reproduz trajetória, orientação e velocidades da referência simulada?
+  operational_envelope:
+    - Referência e candidato executados no CoppeliaSim.
+    - Movimento planar com controle diferencial.
+    - Comparação offline dos logs coletados em 9 de junho de 2025.
+    - O código legado do candidato injeta 500 ms de atraso entre 10 s e 15 s.
+  limitations:
+    - A referência é simulada; o resultado não demonstra fidelidade física.
+    - Os relógios originais são independentes e são comparados por tempo decorrido.
+
+reference:
+  name: pioneer-source
+  role: reference
+  adapter: csv
+  data_path: ../../logs/agv_logs
+  reference_kind: simulated
+
+candidate:
+  name: pioneer-digital-twin
+  role: candidate
+  adapter: csv
+  data_path: ../../logs/twin_logs
+
+alignment:
+  time_basis: elapsed
+  tolerance_seconds: 0.05
+
+signals:
+  - name: odometry.position
+    unit: m
+    frame_id: world
+    dimensions: 3
+  - name: odometry.orientation
+    unit: quaternion
+    frame_id: world
+    dimensions: 4
+  - name: odometry.wheel_velocity
+    unit: rad/s
+    dimensions: 2
+  - name: imu.linear_velocity
+    unit: m/s
+    dimensions: 3
+  - name: imu.angular_velocity
+    unit: rad/s
+    dimensions: 3
+
+metrics:
+  - name: ate_rmse
+    signal: odometry.position
+  - name: endpoint_error
+    signal: odometry.position
+  - name: rpe_translation_rmse
+    signal: odometry.position
+  - name: normalized_dtw
+    signal: odometry.position
+    parameters:
+      window: 0.1
+  - name: quaternion_geodesic_mean
+    signal: odometry.orientation
+  - name: quaternion_geodesic_p95
+    signal: odometry.orientation
+  - name: rpe_rotation_rmse
+    signal: odometry.orientation
+  - name: rmse
+    signal: odometry.wheel_velocity
+  - name: mae
+    signal: imu.linear_velocity
+  - name: mae
+    signal: imu.angular_velocity
+  - name: cross_correlation_lag
+    signal: odometry.wheel_velocity
+    parameters:
+      max_lag_samples: 100
+
+requirements:
+  - id: VER-CFG-001
+    kind: verification
+    statement: A configuração do experimento deve ser completa e consistente.
+    check: configuration
+    critical: true
+    rationale: Evita executar um estudo com papéis, requisitos ou parâmetros ambíguos.
+  - id: VER-DATA-001
+    kind: verification
+    statement: Os sinais usados devem conter dados finitos e timestamps monotônicos.
+    check: data_quality
+    critical: true
+    rationale: Métricas numéricas não são interpretáveis sobre séries corrompidas.
+  - id: VER-ALIGN-001
+    kind: verification
+    statement: Pelo menos 80% das amostras de referência devem ser alinhadas.
+    check: alignment
+    critical: true
+    rationale: A comparação temporal precisa representar a maior parte do ensaio.
+  - id: VER-REPRO-001
+    kind: verification
+    statement: Configuração, seed, revisão e dependências devem ser registradas.
+    check: reproducibility
+    critical: true
+    rationale: O resultado deve poder ser auditado e repetido.
+  - id: VAL-POS-001
+    kind: validation
+    statement: O RMSE absoluto da trajetória deve permanecer abaixo de 0,20 m.
+    metric: ate_rmse
+    signal: odometry.position
+    operator: le
+    threshold: 0.20
+    unit: m
+    critical: true
+    rationale: Limite experimental inicial; não representa ainda um requisito físico calibrado.
+  - id: VAL-ORI-001
+    kind: validation
+    statement: O percentil 95 do erro angular deve permanecer abaixo de 0,20 rad.
+    metric: quaternion_geodesic_p95
+    signal: odometry.orientation
+    operator: le
+    threshold: 0.20
+    unit: rad
+    critical: true
+    rationale: Limite experimental inicial para detectar grande divergência de orientação.
+  - id: VAL-WHEEL-001
+    kind: validation
+    statement: O RMSE das velocidades das rodas deve permanecer abaixo de 1,0 rad/s.
+    metric: rmse
+    signal: odometry.wheel_velocity
+    operator: le
+    threshold: 1.0
+    unit: rad/s
+    critical: true
+    rationale: Limite experimental inicial para detectar degradação no acionamento diferencial.
+
+output_dir: ../../artifacts
+seed: 42

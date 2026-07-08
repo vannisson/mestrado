@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <title>V&V — {{ manifest.experiment }}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 1100px; margin: 2rem auto; color: #17202a; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 2rem; }
+    th, td { border: 1px solid #d5d8dc; padding: .55rem; text-align: left; }
+    th { background: #f4f6f7; }
+    .PASS { color: #18743a; font-weight: 700; }
+    .FAIL, .INVALID { color: #a61b1b; font-weight: 700; }
+    code { background: #f4f6f7; padding: .1rem .3rem; }
+  </style>
+</head>
+<body>
+  <h1>Relatório de verificação e validação</h1>
+  <p><strong>Experimento:</strong> {{ manifest.experiment }}</p>
+  <p><strong>Resultado:</strong> <span class="{{ assessment.status }}">{{ assessment.status }}</span></p>
+  <p><strong>Cobertura:</strong> {{ "%.1f"|format(assessment.coverage * 100) }}%</p>
+  <p><strong>Classe de evidência:</strong> {{ manifest.evidence_class }}</p>
+  {% if manifest.evidence_class == "simulation-to-simulation" %}
+  <p><em>Este resultado não constitui validação contra um sistema físico.</em></p>
+  {% endif %}
+
+  <h2>Checks e requisitos</h2>
+  <table>
+    <thead><tr><th>ID</th><th>Tipo</th><th>Crítico</th><th>Status</th><th>Resumo</th></tr></thead>
+    <tbody>
+    {% for check in assessment.checks %}
+      <tr><td>{{ check.id }}</td><td>{{ check.kind }}</td><td>{{ check.critical }}</td>
+          <td class="{{ check.status }}">{{ check.status }}</td><td>{{ check.summary }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Métricas</h2>
+  <table>
+    <thead><tr><th>Sinal</th><th>Métrica</th><th>Status</th><th>Valor</th><th>Unidade</th><th>N</th></tr></thead>
+    <tbody>
+    {% for metric in metrics %}
+      <tr><td>{{ metric.signal }}</td><td>{{ metric.name }}</td>
+          <td class="{{ metric.status }}">{{ metric.status }}</td>
+          <td>{% if metric.value is not none %}{{ "%.8g"|format(metric.value) }}{% else %}—{% endif %}</td>
+          <td>{{ metric.unit }}</td><td>{{ metric.sample_count }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  {% if plots %}
+  <h2>Visualizações</h2>
+  {% for plot in plots %}
+    <figure>
+      <img src="{{ plot }}" alt="{{ plot }}" style="max-width:100%;">
+      <figcaption>{{ plot }}</figcaption>
+    </figure>
+  {% endfor %}
+  {% endif %}
+
+  <h2>Reprodutibilidade</h2>
+  <p>Run <code>{{ manifest.run_id }}</code>, Git <code>{{ manifest.git_sha }}</code>,
+     configuração <code>{{ manifest.config_sha256 }}</code>, seed {{ manifest.seed }}.</p>
+</body>
+</html>
