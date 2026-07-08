@@ -1,0 +1,102 @@
+name: pioneer-synthetic-delay-fail
+expected_status: FAIL
+
+context_of_use:
+  purpose: Controle negativo para verificar sensibilidade a atraso temporal.
+  question: A pipeline detecta um candidato que responde com atraso de 500 ms?
+  operational_envelope:
+    - Replay offline dos logs simulados do Pioneer.
+    - O candidato sintético usa os valores da referência defasados em 500 ms.
+  limitations:
+    - O atraso é injetado artificialmente; não modela uma causa física específica.
+
+reference:
+  name: pioneer-source
+  role: reference
+  adapter: csv
+  data_path: ../../../logs/agv_logs
+  reference_kind: simulated
+
+candidate:
+  name: pioneer-synthetic-delay
+  role: candidate
+  adapter: synthetic
+  data_path: ../../../logs/agv_logs
+  metadata:
+    seed: 42
+    transformations:
+      - type: delay
+        seconds: 0.5
+        signals:
+          - odometry.position
+          - odometry.orientation
+          - odometry.wheel_velocity
+          - imu.linear_velocity
+          - imu.angular_velocity
+
+alignment:
+  time_basis: elapsed
+  tolerance_seconds: 0.05
+
+signals:
+  - name: odometry.position
+    unit: m
+    frame_id: world
+    dimensions: 3
+  - name: odometry.orientation
+    unit: quaternion
+    frame_id: world
+    dimensions: 4
+  - name: odometry.wheel_velocity
+    unit: rad/s
+    dimensions: 2
+
+metrics:
+  - name: ate_rmse
+    signal: odometry.position
+  - name: normalized_dtw
+    signal: odometry.position
+    parameters:
+      window: 0.1
+  - name: absolute_cross_correlation_lag
+    signal: odometry.wheel_velocity
+    parameters:
+      max_lag_samples: 80
+
+requirements:
+  - id: VER-CFG-001
+    kind: verification
+    statement: A configuração do experimento deve ser completa e consistente.
+    check: configuration
+    critical: true
+  - id: VER-DATA-001
+    kind: verification
+    statement: Os sinais usados devem conter dados finitos e timestamps monotônicos.
+    check: data_quality
+    critical: true
+  - id: VER-ALIGN-001
+    kind: verification
+    statement: Pelo menos 80% das amostras de referência devem ser alinhadas.
+    check: alignment
+    critical: true
+  - id: VAL-LAG-001
+    kind: validation
+    statement: O atraso estimado por correlação cruzada deve ficar abaixo de 100 ms.
+    metric: absolute_cross_correlation_lag
+    signal: odometry.wheel_velocity
+    operator: le
+    threshold: 0.10
+    unit: s
+    critical: true
+  - id: VAL-POS-001
+    kind: validation
+    statement: O atraso não deve degradar a trajetória acima de 0,20 m.
+    metric: ate_rmse
+    signal: odometry.position
+    operator: le
+    threshold: 0.20
+    unit: m
+    critical: true
+
+output_dir: ../../../artifacts
+seed: 42

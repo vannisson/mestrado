@@ -1,0 +1,89 @@
+name: pioneer-synthetic-dropout-fail
+expected_status: FAIL
+
+context_of_use:
+  purpose: Controle negativo de verificação para detectar perda de amostras.
+  question: A pipeline rejeita um ensaio com cobertura temporal insuficiente?
+  operational_envelope:
+    - Replay offline dos logs simulados do Pioneer.
+    - O candidato sintético mantém apenas uma amostra a cada seis em sinais críticos.
+  limitations:
+    - A perda de amostras é determinística e não substitui ensaios de rede reais.
+
+reference:
+  name: pioneer-source
+  role: reference
+  adapter: csv
+  data_path: ../../../logs/agv_logs
+  reference_kind: simulated
+
+candidate:
+  name: pioneer-synthetic-dropout
+  role: candidate
+  adapter: synthetic
+  data_path: ../../../logs/agv_logs
+  metadata:
+    seed: 42
+    transformations:
+      - type: dropout
+        keep_every: 6
+        signals:
+          - odometry.position
+          - odometry.orientation
+          - odometry.wheel_velocity
+          - imu.linear_velocity
+          - imu.angular_velocity
+
+alignment:
+  time_basis: elapsed
+  tolerance_seconds: 0.05
+
+signals:
+  - name: odometry.position
+    unit: m
+    frame_id: world
+    dimensions: 3
+  - name: odometry.orientation
+    unit: quaternion
+    frame_id: world
+    dimensions: 4
+  - name: odometry.wheel_velocity
+    unit: rad/s
+    dimensions: 2
+
+metrics:
+  - name: ate_rmse
+    signal: odometry.position
+  - name: quaternion_geodesic_p95
+    signal: odometry.orientation
+  - name: rmse
+    signal: odometry.wheel_velocity
+
+requirements:
+  - id: VER-CFG-001
+    kind: verification
+    statement: A configuração do experimento deve ser completa e consistente.
+    check: configuration
+    critical: true
+  - id: VER-DATA-001
+    kind: verification
+    statement: Os sinais usados devem conter dados finitos e timestamps monotônicos.
+    check: data_quality
+    critical: true
+  - id: VER-ALIGN-001
+    kind: verification
+    statement: Pelo menos 80% das amostras de referência devem ser alinhadas.
+    check: alignment
+    critical: true
+  - id: VAL-POS-001
+    kind: validation
+    statement: A trajetória só é interpretável quando há cobertura temporal suficiente.
+    metric: ate_rmse
+    signal: odometry.position
+    operator: le
+    threshold: 0.20
+    unit: m
+    critical: true
+
+output_dir: ../../../artifacts
+seed: 42

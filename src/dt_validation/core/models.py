@@ -126,6 +126,7 @@ class ExperimentConfig(BaseModel):
     requirements: list[Requirement]
     output_dir: Path = Path("artifacts")
     seed: int = 42
+    expected_status: CheckStatus | None = None
 
     @model_validator(mode="after")
     def validate_roles_and_ids(self) -> ExperimentConfig:

@@ -1,0 +1,120 @@
+name: pioneer-synthetic-noise-pass
+expected_status: PASS
+
+context_of_use:
+  purpose: Controle positivo com ruído leve para calibrar tolerância experimental inicial.
+  question: A pipeline aceita perturbações pequenas que não mudam a validade do twin?
+  operational_envelope:
+    - Replay offline dos logs simulados do Pioneer.
+    - O candidato sintético recebe ruído gaussiano baixo em posição, rodas e IMU.
+  limitations:
+    - Os limiares são preliminares e devem ser refinados com requisitos do contexto de uso.
+
+reference:
+  name: pioneer-source
+  role: reference
+  adapter: csv
+  data_path: ../../../logs/agv_logs
+  reference_kind: simulated
+
+candidate:
+  name: pioneer-synthetic-noise
+  role: candidate
+  adapter: synthetic
+  data_path: ../../../logs/agv_logs
+  metadata:
+    seed: 7
+    transformations:
+      - type: noise
+        signals:
+          - odometry.position
+          - odometry.wheel_velocity
+          - imu.linear_velocity
+          - imu.angular_velocity
+        std_by_signal:
+          odometry.position: 0.015
+          odometry.wheel_velocity: 0.05
+          imu.linear_velocity: 0.01
+          imu.angular_velocity: 0.01
+
+alignment:
+  time_basis: elapsed
+  tolerance_seconds: 0.05
+
+signals:
+  - name: odometry.position
+    unit: m
+    frame_id: world
+    dimensions: 3
+  - name: odometry.orientation
+    unit: quaternion
+    frame_id: world
+    dimensions: 4
+  - name: odometry.wheel_velocity
+    unit: rad/s
+    dimensions: 2
+  - name: imu.linear_velocity
+    unit: m/s
+    dimensions: 3
+  - name: imu.angular_velocity
+    unit: rad/s
+    dimensions: 3
+
+metrics:
+  - name: ate_rmse
+    signal: odometry.position
+  - name: quaternion_geodesic_p95
+    signal: odometry.orientation
+  - name: rmse
+    signal: odometry.wheel_velocity
+  - name: mae
+    signal: imu.linear_velocity
+  - name: mae
+    signal: imu.angular_velocity
+
+requirements:
+  - id: VER-CFG-001
+    kind: verification
+    statement: A configuração do experimento deve ser completa e consistente.
+    check: configuration
+    critical: true
+  - id: VER-DATA-001
+    kind: verification
+    statement: Os sinais usados devem conter dados finitos e timestamps monotônicos.
+    check: data_quality
+    critical: true
+  - id: VER-ALIGN-001
+    kind: verification
+    statement: Pelo menos 80% das amostras de referência devem ser alinhadas.
+    check: alignment
+    critical: true
+  - id: VAL-POS-001
+    kind: validation
+    statement: O ruído leve deve manter o RMSE absoluto da trajetória abaixo de 5 cm.
+    metric: ate_rmse
+    signal: odometry.position
+    operator: le
+    threshold: 0.05
+    unit: m
+    critical: true
+  - id: VAL-ORI-001
+    kind: validation
+    statement: O ruído leve não altera a orientação neste controle.
+    metric: quaternion_geodesic_p95
+    signal: odometry.orientation
+    operator: le
+    threshold: 0.001
+    unit: rad
+    critical: true
+  - id: VAL-WHEEL-001
+    kind: validation
+    statement: O ruído leve deve manter o RMSE das rodas abaixo de 0,20 rad/s.
+    metric: rmse
+    signal: odometry.wheel_velocity
+    operator: le
+    threshold: 0.20
+    unit: rad/s
+    critical: true
+
+output_dir: ../../../artifacts
+seed: 7

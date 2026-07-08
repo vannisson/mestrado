@@ -10,6 +10,7 @@ simulação de referência com os do candidato a twin.
 uv sync --locked
 uv run dtv doctor
 uv run dtv replay experiments/pioneer/replay.yaml
+uv run dtv suite experiments/pioneer/synthetic
 ```
 
 Cada replay produz um dossiê em `artifacts/<experimento>/<run-id>/`, contendo dados,
@@ -17,6 +18,9 @@ métricas, evidências, matriz de rastreabilidade e relatório HTML. Uma referê
 simulada é sempre identificada como evidência *simulation-to-simulation*; o framework
 não a apresenta como validação física.
 
+Os cenários em `experiments/pioneer/synthetic/` funcionam como uma bancada de
+calibração inicial: identidade e ruído leve devem passar; atraso, drift e perda de
+amostras devem falhar por razões rastreáveis.
+
 O código anterior está preservado em `legacy/`. A integração ao vivo com o
 CoppeliaSim será implementada sobre os mesmos contratos usados pelo replay.
-

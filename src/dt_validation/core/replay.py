@@ -11,11 +11,13 @@ from uuid import uuid4
 
 from dt_validation import __version__
 from dt_validation.adapters.csv_replay import CsvReplayAdapter
+from dt_validation.adapters.synthetic import SyntheticReplayAdapter
 from dt_validation.core.alignment import align_nearest
 from dt_validation.core.config import load_experiment
 from dt_validation.core.models import (
     CheckStatus,
     MetricResult,
+    ParticipantSpec,
     ReferenceKind,
     RunManifest,
 )
@@ -38,22 +40,10 @@ class ReplayOutcome:
 def run_replay(config_path: str | Path) -> ReplayOutcome:
     source_path = Path(config_path).resolve()
     config = load_experiment(source_path)
-    if config.reference.adapter != "csv" or config.candidate.adapter != "csv":
-        raise ValueError("replay currently requires csv adapters for both participants")
-    if config.reference.data_path is None or config.candidate.data_path is None:
-        raise ValueError("CSV participants must declare data_path")
 
     run_id = _run_id()
-    reference = CsvReplayAdapter(
-        config.reference.name,
-        config.reference.data_path,
-        run_id,
-    )
-    candidate = CsvReplayAdapter(
-        config.candidate.name,
-        config.candidate.data_path,
-        run_id,
-    )
+    reference = _adapter(config.reference, run_id)
+    candidate = _adapter(config.candidate, run_id)
     reference_frames = reference.load()
     candidate_frames = candidate.load()
 
@@ -123,6 +113,16 @@ def run_replay(config_path: str | Path) -> ReplayOutcome:
         metrics=metric_results,
         assessment=assessment,
     )
+
+
+def _adapter(spec: ParticipantSpec, run_id: str) -> CsvReplayAdapter | SyntheticReplayAdapter:
+    if spec.data_path is None:
+        raise ValueError(f"{spec.adapter} participant must declare data_path")
+    if spec.adapter == "csv":
+        return CsvReplayAdapter(spec.name, spec.data_path, run_id)
+    if spec.adapter == "synthetic":
+        return SyntheticReplayAdapter(spec.name, spec.data_path, run_id, spec.metadata)
+    raise ValueError(f"unsupported replay adapter: {spec.adapter}")
 
 
 def _manifest(

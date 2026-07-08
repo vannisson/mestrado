@@ -1,0 +1,100 @@
+name: pioneer-synthetic-identity-pass
+expected_status: PASS
+
+context_of_use:
+  purpose: Controle positivo para verificar que o framework aceita sinais equivalentes.
+  question: A pipeline retorna PASS quando candidato e referência são semanticamente idênticos?
+  operational_envelope:
+    - Replay offline dos logs simulados do Pioneer.
+    - O candidato sintético é uma cópia determinística da referência.
+  limitations:
+    - Não demonstra fidelidade física; valida apenas o comportamento interno da pipeline.
+
+reference:
+  name: pioneer-source
+  role: reference
+  adapter: csv
+  data_path: ../../../logs/agv_logs
+  reference_kind: simulated
+
+candidate:
+  name: pioneer-synthetic-identity
+  role: candidate
+  adapter: synthetic
+  data_path: ../../../logs/agv_logs
+  metadata:
+    seed: 42
+    transformations:
+      - type: identity
+
+alignment:
+  time_basis: elapsed
+  tolerance_seconds: 0.05
+
+signals:
+  - name: odometry.position
+    unit: m
+    frame_id: world
+    dimensions: 3
+  - name: odometry.orientation
+    unit: quaternion
+    frame_id: world
+    dimensions: 4
+  - name: odometry.wheel_velocity
+    unit: rad/s
+    dimensions: 2
+
+metrics:
+  - name: ate_rmse
+    signal: odometry.position
+  - name: quaternion_geodesic_p95
+    signal: odometry.orientation
+  - name: rmse
+    signal: odometry.wheel_velocity
+
+requirements:
+  - id: VER-CFG-001
+    kind: verification
+    statement: A configuração do experimento deve ser completa e consistente.
+    check: configuration
+    critical: true
+  - id: VER-DATA-001
+    kind: verification
+    statement: Os sinais usados devem conter dados finitos e timestamps monotônicos.
+    check: data_quality
+    critical: true
+  - id: VER-ALIGN-001
+    kind: verification
+    statement: Pelo menos 80% das amostras de referência devem ser alinhadas.
+    check: alignment
+    critical: true
+  - id: VAL-POS-001
+    kind: validation
+    statement: O controle positivo deve ter erro absoluto de trajetória praticamente nulo.
+    metric: ate_rmse
+    signal: odometry.position
+    operator: le
+    threshold: 0.001
+    unit: m
+    critical: true
+  - id: VAL-ORI-001
+    kind: validation
+    statement: O controle positivo deve preservar a orientação.
+    metric: quaternion_geodesic_p95
+    signal: odometry.orientation
+    operator: le
+    threshold: 0.001
+    unit: rad
+    critical: true
+  - id: VAL-WHEEL-001
+    kind: validation
+    statement: O controle positivo deve preservar as velocidades das rodas.
+    metric: rmse
+    signal: odometry.wheel_velocity
+    operator: le
+    threshold: 0.001
+    unit: rad/s
+    critical: true
+
+output_dir: ../../../artifacts
+seed: 42

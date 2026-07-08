@@ -73,6 +73,25 @@ def cross_correlation_lag(
     return lag_samples * timestep
 
 
+def absolute_cross_correlation_lag(
+    reference: np.ndarray,
+    candidate: np.ndarray,
+    *,
+    timestamps: np.ndarray,
+    max_lag_samples: int | None = None,
+    **kwargs: object,
+) -> float:
+    return abs(
+        cross_correlation_lag(
+            reference,
+            candidate,
+            timestamps=timestamps,
+            max_lag_samples=max_lag_samples,
+            **kwargs,
+        )
+    )
+
+
 def stream_statistics(frame: SignalFrame) -> dict[str, float]:
     if len(frame.timestamps) < 2:
         raise MetricError("stream statistics need at least two samples")

@@ -21,6 +21,7 @@ METRIC_REGISTRY: dict[str, tuple[MetricFunction, str]] = {
     "steady_state_error": (signal.steady_state_error, "signal-unit"),
     "normalized_dtw": (temporal.normalized_dtw, "signal-unit"),
     "cross_correlation_lag": (temporal.cross_correlation_lag, "s"),
+    "absolute_cross_correlation_lag": (temporal.absolute_cross_correlation_lag, "s"),
     "ate_rmse": (robotics.ate_rmse, "m"),
     "endpoint_error": (robotics.endpoint_error, "m"),
     "path_length_relative_error": (robotics.path_length_relative_error, "ratio"),

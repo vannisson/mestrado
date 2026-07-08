@@ -1,0 +1,92 @@
+name: pioneer-synthetic-drift-fail
+expected_status: FAIL
+
+context_of_use:
+  purpose: Controle negativo para verificar sensibilidade a drift espacial.
+  question: A pipeline detecta um candidato cuja trajetória se afasta gradualmente?
+  operational_envelope:
+    - Replay offline dos logs simulados do Pioneer.
+    - O candidato sintético recebe drift linear de 60 cm no eixo X.
+  limitations:
+    - O drift é artificial e serve para caracterizar sensibilidade das métricas.
+
+reference:
+  name: pioneer-source
+  role: reference
+  adapter: csv
+  data_path: ../../../logs/agv_logs
+  reference_kind: simulated
+
+candidate:
+  name: pioneer-synthetic-drift
+  role: candidate
+  adapter: synthetic
+  data_path: ../../../logs/agv_logs
+  metadata:
+    seed: 42
+    transformations:
+      - type: drift
+        signals:
+          - odometry.position
+        final_offset_by_signal:
+          odometry.position: [0.60, 0.0, 0.0]
+
+alignment:
+  time_basis: elapsed
+  tolerance_seconds: 0.05
+
+signals:
+  - name: odometry.position
+    unit: m
+    frame_id: world
+    dimensions: 3
+  - name: odometry.orientation
+    unit: quaternion
+    frame_id: world
+    dimensions: 4
+
+metrics:
+  - name: ate_rmse
+    signal: odometry.position
+  - name: endpoint_error
+    signal: odometry.position
+  - name: quaternion_geodesic_p95
+    signal: odometry.orientation
+
+requirements:
+  - id: VER-CFG-001
+    kind: verification
+    statement: A configuração do experimento deve ser completa e consistente.
+    check: configuration
+    critical: true
+  - id: VER-DATA-001
+    kind: verification
+    statement: Os sinais usados devem conter dados finitos e timestamps monotônicos.
+    check: data_quality
+    critical: true
+  - id: VER-ALIGN-001
+    kind: verification
+    statement: Pelo menos 80% das amostras de referência devem ser alinhadas.
+    check: alignment
+    critical: true
+  - id: VAL-POS-001
+    kind: validation
+    statement: O RMSE absoluto da trajetória deve permanecer abaixo de 0,20 m.
+    metric: ate_rmse
+    signal: odometry.position
+    operator: le
+    threshold: 0.20
+    unit: m
+    critical: true
+  - id: VAL-END-001
+    kind: validation
+    statement: O erro final de posição deve permanecer abaixo de 0,25 m.
+    metric: endpoint_error
+    signal: odometry.position
+    operator: le
+    threshold: 0.25
+    unit: m
+    critical: true
+
+output_dir: ../../../artifacts
+seed: 42

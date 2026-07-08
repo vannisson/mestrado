@@ -14,7 +14,12 @@ from dt_validation.metrics.robotics import (
 )
 from dt_validation.metrics.signal import mae, mse, rmse
 from dt_validation.metrics.statistics import bootstrap_summary
-from dt_validation.metrics.temporal import cross_correlation_lag, normalized_dtw, stream_statistics
+from dt_validation.metrics.temporal import (
+    absolute_cross_correlation_lag,
+    cross_correlation_lag,
+    normalized_dtw,
+    stream_statistics,
+)
 
 
 def test_pointwise_metrics_have_known_values() -> None:
@@ -87,6 +92,11 @@ def test_lag_and_stream_statistics_are_explicit() -> None:
     frame = SignalFrame("pulse", timestamps, reference)
 
     assert cross_correlation_lag(
+        reference,
+        candidate,
+        timestamps=timestamps,
+    ) == pytest.approx(0.1)
+    assert absolute_cross_correlation_lag(
         reference,
         candidate,
         timestamps=timestamps,
