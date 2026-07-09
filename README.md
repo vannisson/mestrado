@@ -22,5 +22,8 @@ Os cenários em `experiments/pioneer/synthetic/` funcionam como uma bancada de
 calibração inicial: identidade e ruído leve devem passar; atraso, drift e perda de
 amostras devem falhar por razões rastreáveis.
 
+O andamento atual e os próximos marcos estão documentados em
+`docs/research/work-plan-progress.md`.
+
 O código anterior está preservado em `legacy/`. A integração ao vivo com o
 CoppeliaSim será implementada sobre os mesmos contratos usados pelo replay.
